@@ -4,9 +4,11 @@ add_library(
   Badge.cpp
   BlameEditor.cpp
   BlameMargin.cpp
+  ChatPanel.cpp
   ColumnView.cpp
   CommitList.cpp
   CommitToolBar.cpp
+  CodeReviewDialog.cpp
   CommitEditor.cpp
   ContextMenuButton.cpp
   DetailView.cpp
@@ -40,6 +42,7 @@ add_library(
   RemoteCallbacks.cpp
   SearchField.cpp
   SideBar.cpp
+  SshDialog.cpp
   StateAction.cpp
   StatePushButton.cpp
   SpellChecker.cpp
@@ -62,6 +65,7 @@ target_include_directories(ui PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 target_link_libraries(
   ui
+  ai
   conf
   cred
   dialogs

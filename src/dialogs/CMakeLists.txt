@@ -41,6 +41,7 @@ target_include_directories(dialogs PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 target_link_libraries(
   dialogs
+  ai
   cli
   conf
   cred

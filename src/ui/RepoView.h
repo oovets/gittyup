@@ -28,6 +28,7 @@
 #include <QTimer>
 #include <functional>
 
+class ChatPanel;
 class CommitList;
 class DetailView;
 class EditorWindow;
@@ -139,6 +140,11 @@ public:
   // log window
   bool isLogVisible() const;
   void setLogVisible(bool visible);
+
+  // chat panel
+  bool isChatVisible() const;
+  void setChatVisible(bool visible);
+  ChatPanel *chatPanel() const;
 
   /*!
    * \brief addLogEntry
@@ -423,6 +429,9 @@ private:
   LogView *mLogView;
   QTimer mLogTimer;
   bool mIsLogVisible = false;
+
+  ChatPanel *mChatPanel;
+  bool mIsChatVisible = false;
 
   QTimer mFetchTimer;
   RemoteCallbacks *mCallbacks = nullptr;

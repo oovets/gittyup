@@ -21,6 +21,14 @@
 #include <QRegularExpression>
 #include <QRegularExpressionMatch>
 #include <QActionGroup>
+#include <QSettings>
+#include <QDialog>
+#include <QFontDatabase>
+#include "CodeReviewDialog.h"
+#include "ai/AiService.h"
+#include "ai/CodebaseIndex.h"
+#include "ai/FindingParser.h"
+#include "ai/KnowledgeBase.h"
 
 namespace {
 const QString kDictKey = "commit.spellcheck.dict";
@@ -488,6 +496,36 @@ CommitEditor::CommitEditor(const git::Repository &repo, QWidget *parent)
   mUnstage = new QPushButton(tr("Unstage All"), this);
   connect(mUnstage, &QPushButton::clicked, this, &CommitEditor::unstage);
 
+  mAiGenerate = new QPushButton(tr("Generate Message"), this);
+  mAiGenerate->setObjectName("AiGenerate");
+  mAiGenerate->setToolTip(tr("Generate commit message from diff using AI"));
+  connect(mAiGenerate, &QPushButton::clicked, this,
+          &CommitEditor::generateAiMessage);
+
+  mAiReview = new QPushButton(tr("Review Code"), this);
+  mAiReview->setObjectName("AiReview");
+  mAiReview->setToolTip(tr("Review diff for bugs and security issues using AI"));
+  connect(mAiReview, &QPushButton::clicked, this, &CommitEditor::reviewCode);
+
+  mAiHistory = new QPushButton(tr("Review History"), this);
+  mAiHistory->setObjectName("AiHistory");
+  mAiHistory->setToolTip(tr("Browse past code reviews for this repository"));
+  connect(mAiHistory, &QPushButton::clicked, this, [this] {
+    CodeReviewDialog *dlg = new CodeReviewDialog(mRepo, this);
+    dlg->open();
+  });
+
+  mGenerateSpinner = new SpinnerButton(mAiGenerate, this);
+  mReviewSpinner   = new SpinnerButton(mAiReview,   this);
+
+  mAiChat = new QPushButton(tr("Chat"), this);
+  mAiChat->setObjectName("AiChat");
+  mAiChat->setToolTip(tr("Toggle AI Chat panel"));
+  connect(mAiChat, &QPushButton::clicked, this, [this] {
+    if (RepoView *view = RepoView::parentView(this))
+      view->setChatVisible(!view->isChatVisible());
+  });
+
   mCommit = new QPushButton(tr("Commit"), this);
   mCommit->setDefault(true);
   connect(mCommit, &QPushButton::clicked, this, &CommitEditor::commit);
@@ -519,6 +557,10 @@ CommitEditor::CommitEditor(const git::Repository &repo, QWidget *parent)
   buttonLayout->addStretch();
   buttonLayout->addWidget(mStage);
   buttonLayout->addWidget(mUnstage);
+  buttonLayout->addWidget(mAiGenerate);
+  buttonLayout->addWidget(mAiReview);
+  buttonLayout->addWidget(mAiHistory);
+  buttonLayout->addWidget(mAiChat);
   buttonLayout->addWidget(mCommit);
   buttonLayout->addWidget(mRebaseContinue);
   buttonLayout->addWidget(mRebaseAbort);
@@ -677,6 +719,192 @@ void CommitEditor::applyTemplate(const QString &t, const QStringList &files) {
 }
 
 void CommitEditor::applyTemplate(const QString &t) { applyTemplate(t, {}); }
+
+static QByteArray collectDiff(git::Diff staged, const git::Repository &repo, int maxBytes) {
+  QByteArray diff = staged.isValid() ? staged.print() : QByteArray{};
+  if (diff.isEmpty() && repo.isValid()) {
+    git::Diff workdir = repo.diffIndexToWorkdir();
+    diff = workdir.print();
+  }
+  if (diff.size() > maxBytes)
+    diff = diff.left(maxBytes) + "\n[diff truncated]";
+  return diff;
+}
+
+void CommitEditor::generateAiMessage() {
+  QByteArray diff = collectDiff(mDiff, mRepo, 12000);
+  if (diff.isEmpty()) {
+    QMessageBox::information(this, tr("Generate Message"),
+                             tr("No changes found (staged or unstaged)."));
+    return;
+  }
+
+  QString prompt =
+      QStringLiteral(
+          "Generate a concise git commit message for the following diff.\n"
+          "Use conventional commits format (e.g. feat:, fix:, refactor:) "
+          "when appropriate.\n"
+          "Output only the commit message — no explanation, no markdown.\n\n") +
+      QString::fromUtf8(diff);
+
+  mGenerateSpinner->start(tr("Generating…"));
+
+  AiService::instance()->chat(prompt, 256, [this](const QString &text, const QString &error) {
+    mGenerateSpinner->stop();
+
+    if (!error.isEmpty()) {
+      QMessageBox::warning(this, tr("AI Commit Message"),
+                           tr("Request failed: %1").arg(error));
+      return;
+    }
+
+    mMessage->setPlainText(text);
+    mMessage->setFocus();
+  });
+}
+
+static QString headSha(const git::Repository &repo) {
+  git::Reference head = repo.head();
+  if (head.isValid()) {
+    git::Commit commit = head.target();
+    if (commit.isValid())
+      return commit.id().toString();
+  }
+  return {};
+}
+
+static QStringList extractHunkTexts(const QByteArray &diff) {
+  QStringList hunks;
+  QString text = QString::fromUtf8(diff);
+  static const QRegularExpression hunkRe(R"(^@@[^@]+@@.*$)",
+                                         QRegularExpression::MultilineOption);
+  auto it = hunkRe.globalMatch(text);
+  QList<int> starts;
+  while (it.hasNext()) {
+    auto m = it.next();
+    starts.append(m.capturedStart());
+  }
+  for (int i = 0; i < starts.size(); ++i) {
+    int end = (i + 1 < starts.size()) ? starts[i + 1] : text.size();
+    QString hunk = text.mid(starts[i], end - starts[i]).trimmed();
+    if (!hunk.isEmpty())
+      hunks.append(hunk);
+  }
+  return hunks;
+}
+
+void CommitEditor::reviewCode() {
+  QByteArray diff = collectDiff(mDiff, mRepo, 16000);
+  if (diff.isEmpty()) {
+    QMessageBox::information(this, tr("Review Code"),
+                             tr("No changes found (staged or unstaged)."));
+    return;
+  }
+
+  KnowledgeBase *kb = KnowledgeBase::instance();
+
+  // Step 1: Exact diff hash lookup
+  if (kb->isEnabled()) {
+    QString cached = kb->findExactReview(diff);
+    if (!cached.isEmpty()) {
+      kb->incrementCacheHits();
+      CodeReviewDialog *dlg = new CodeReviewDialog(
+          cached, diff, headSha(mRepo), mRepo, this);
+      dlg->open();
+      return;
+    }
+  }
+
+  mAiReview->setEnabled(false);
+  mAiReview->setText(tr("Reviewing..."));
+
+  // Step 2: Semantic similarity check (async)
+  if (kb->isEnabled()) {
+    QStringList hunks = extractHunkTexts(diff);
+    if (!hunks.isEmpty()) {
+      kb->findSimilarFindings(hunks,
+          [this, diff, kb](KnowledgeBase::MatchResult result) {
+        if (result.sufficient) {
+          kb->incrementCacheHits();
+          mAiReview->setEnabled(true);
+          mAiReview->setText(tr("Review Code"));
+
+          QString composed =
+              FindingParser::composeReviewFromFindings(result.findings);
+          CodeReviewDialog *dlg = new CodeReviewDialog(
+              composed, diff, headSha(mRepo), mRepo, this);
+          dlg->open();
+          return;
+        }
+
+        // Step 3: Fall through to full AI review
+        kb->incrementCacheMisses();
+        performFullReview(diff);
+      });
+      return;
+    }
+  }
+
+  // No knowledge base or no hunks - go straight to API
+  if (kb->isEnabled())
+    kb->incrementCacheMisses();
+  performFullReview(diff);
+}
+
+void CommitEditor::performFullReview(const QByteArray &diff) {
+  auto sendReview = [this, diff](const QString &codebaseContext) {
+    QString prompt =
+        QStringLiteral(
+            "Review the following git diff for bugs, security vulnerabilities, "
+            "and code quality issues.\n"
+            "For each issue found:\n"
+            "- State severity: CRITICAL / HIGH / MEDIUM / LOW\n"
+            "- Identify the file and approximate line\n"
+            "- Explain the problem concisely\n"
+            "- Suggest a fix\n\n"
+            "If no issues are found, say so clearly.\n\n");
+
+    if (!codebaseContext.isEmpty())
+      prompt += codebaseContext + "\n";
+
+    prompt += QString::fromUtf8(diff);
+
+    AiService::instance()->chat(prompt, 1024,
+        [this, diff](const QString &text, const QString &error) {
+      mAiReview->setEnabled(true);
+      mAiReview->setText(tr("Review Code"));
+
+      if (!error.isEmpty()) {
+        QMessageBox::warning(this, tr("Code Review"),
+                             tr("Request failed: %1").arg(error));
+        return;
+      }
+
+      CodeReviewDialog *dlg = new CodeReviewDialog(
+          text, diff, headSha(mRepo), mRepo, this);
+      dlg->open();
+
+      KnowledgeBase *kb = KnowledgeBase::instance();
+      if (kb->isEnabled()) {
+        QList<KnowledgeBase::Finding> findings = FindingParser::parse(text);
+        kb->storeReview(diff, mRepo.workdir().path(), text, findings);
+      }
+    });
+  };
+
+  // Search codebase index for relevant context
+  CodebaseIndex *idx = CodebaseIndex::instance();
+  CodebaseIndex::IndexStats st = idx->stats();
+  if (st.totalChunks > 0) {
+    idx->searchSimilar(QString::fromUtf8(diff).left(2000), 5,
+        [sendReview, idx](QList<CodebaseIndex::SearchResult> results) {
+          QString context = idx->buildContext(results);
+          sendReview(context);
+        });
+  } else {
+    sendReview({});
+  }
+}
 
 void CommitEditor::updateButtons(bool yieldFocus) {
   RepoView *view = RepoView::parentView(this);

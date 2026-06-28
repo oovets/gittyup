@@ -3,6 +3,7 @@
 
 #include "git/Repository.h"
 #include "git/Diff.h"
+#include "SpinnerButton.h"
 
 #include <QFrame>
 #include <QTextCharFormat>
@@ -44,7 +45,12 @@ public slots:
   void applyTemplate(const QString &t, const QStringList &files);
   void applyTemplate(const QString &t);
 
+private slots:
+  void generateAiMessage();
+  void reviewCode();
+
 private:
+  void performFullReview(const QByteArray &diff);
   void updateButtons(bool yieldFocus = true);
   QTextEdit *textEdit() const;
 
@@ -59,6 +65,12 @@ private:
   QPushButton *mRebaseAbort;
   QPushButton *mRebaseContinue;
   QPushButton *mMergeAbort;
+  QPushButton   *mAiGenerate;
+  QPushButton   *mAiReview;
+  QPushButton   *mAiHistory;
+  QPushButton   *mAiChat;
+  SpinnerButton *mGenerateSpinner = nullptr;
+  SpinnerButton *mReviewSpinner   = nullptr;
   TemplateButton *mTemplate;
 
   bool mEditorEmpty = true;

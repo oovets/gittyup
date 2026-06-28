@@ -26,7 +26,8 @@ public:
     Plugins,
     Misc,
     Hotkeys,
-    Terminal
+    Terminal,
+    Ai
   };
 
   SettingsDialog(Index index, QWidget *parent = nullptr);

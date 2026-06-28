@@ -88,6 +88,7 @@ private:
   // View
   QAction *mRefresh;
   QAction *mToggleLog;
+  QAction *mToggleChat;
   QAction *mToggleView;
   QAction *mToggleMenuBar;
   StateAction *mToggleMaximize;

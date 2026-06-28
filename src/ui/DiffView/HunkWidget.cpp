@@ -7,6 +7,7 @@
 #include "EditButton.h"
 #include "DiscardButton.h"
 #include "app/Application.h"
+#include "app/Theme.h"
 
 #include "Editor.h"
 
@@ -26,6 +27,11 @@
 #include <QTableWidget>
 #include <QShortcut>
 #include <QHeaderView>
+#include <QFontDatabase>
+#include <QPalette>
+#include <QScrollArea>
+#include <QTextBrowser>
+#include "ai/AiService.h"
 
 namespace {
 
@@ -135,6 +141,14 @@ _HunkWidget::Header::Header(const git::Diff &diff, const git::Patch &patch,
     buttons->addSpacing(8);
   }
 
+  QToolButton *explain = new QToolButton(this);
+  explain->setObjectName("ExplainHunk");
+  explain->setText(HunkWidget::tr("Explain"));
+  explain->setToolTip(HunkWidget::tr("Explain this change with AI"));
+  connect(explain, &QToolButton::clicked, this,
+          &_HunkWidget::Header::explainRequested);
+
+  buttons->addWidget(explain);
   buttons->addWidget(edit);
   if (discard)
     buttons->addWidget(discard);
@@ -203,6 +217,8 @@ HunkWidget::HunkWidget(DiffView *view, const git::Diff &diff,
   mHeader = new _HunkWidget::Header(diff, patch, index, lfs, submodule, this);
   layout->addWidget(mHeader);
   connect(mHeader, &_HunkWidget::Header::discard, this, &HunkWidget::discard);
+  connect(mHeader, &_HunkWidget::Header::explainRequested, this,
+          &HunkWidget::explainHunk);
 
   mEditor = new Editor(this);
   mEditor->setLexer(patch.name());
@@ -1276,4 +1292,218 @@ void HunkWidget::chooseLines(TextEditor::Marker kind) {
   }
 
   mEditor->setReadOnly(true);
+}
+
+// ---------------------------------------------------------------------------
+// Diff-view-style hunk + AI explanation renderer
+// ---------------------------------------------------------------------------
+
+static QString hunkMdInline(const QString &raw, const QString &codeColor,
+                             const QString &codeBg);
+
+// Shared inline markdown renderer
+static QString explainMdInline(const QString &raw, const QString &codeColor,
+                               const QString &codeBg) {
+  QString out;
+  int i = 0, len = raw.length();
+  while (i < len) {
+    if (raw[i] == '`') {
+      int end = raw.indexOf('`', i + 1);
+      if (end > i) {
+        out += QString("<code style='color:%1; background:%2; padding:1px 4px;"
+                       " border-radius:2px; font-family:monospace;'>%3</code>")
+                   .arg(codeColor, codeBg, raw.mid(i+1, end-i-1).toHtmlEscaped());
+        i = end + 1; continue;
+      }
+    }
+    if (i+1 < len && raw[i]=='*' && raw[i+1]=='*') {
+      int end = raw.indexOf("**", i+2);
+      if (end > i) {
+        out += "<strong>" + explainMdInline(raw.mid(i+2, end-i-2), codeColor, codeBg) + "</strong>";
+        i = end + 2; continue;
+      }
+    }
+    if (raw[i] == '*') {
+      int end = raw.indexOf('*', i+1);
+      if (end > i) {
+        out += "<em>" + explainMdInline(raw.mid(i+1, end-i-1), codeColor, codeBg) + "</em>";
+        i = end + 1; continue;
+      }
+    }
+    out += QString(raw[i]).toHtmlEscaped();
+    ++i;
+  }
+  return out;
+}
+
+static QString hunkMdInline(const QString &raw, const QString &codeColor,
+                             const QString &codeBg) {
+  return explainMdInline(raw, codeColor, codeBg);
+}
+
+// Render hunk diff + AI explanation using exact diff-view theme colors
+static QString renderExplainHtml(const QString &hunkText, const QString &aiText) {
+  auto *theme = Application::theme();
+
+  // Exact same colors the diff view uses
+  QString addBg   = theme->diff(Theme::Diff::Addition).name();
+  QString delBg   = theme->diff(Theme::Diff::Deletion).name();
+  QString plusCol = theme->diff(Theme::Diff::Plus).name();
+  QString minCol  = theme->diff(Theme::Diff::Minus).name();
+  QString noteBg  = theme->diff(Theme::Diff::Note).name();  // hunk header bg
+  QString warnCol = theme->diff(Theme::Diff::Warning).name();
+
+  bool dark = qApp->palette().window().color().lightness() < 128;
+  QString docBg   = qApp->palette().base().color().name();
+  QString docFg   = qApp->palette().text().color().name();
+  QString hdrBg   = dark ? "#252535" : "#EAEAF4";
+  QString hdrFg   = dark ? "#8090B8" : "#505080";
+  QString divCol  = dark ? "#303040" : "#D0D0D8";
+  QString expBg   = dark ? "#181820" : "#F8F8FC";
+  QString codeCol = dark ? "#C0D8F0" : "#1E5B9B";
+  QString codeBg  = dark ? "#1E2838" : "#EEF3F8";
+  QString head    = dark ? "#90B8D8" : "#1E5080";
+  QString addFg   = dark ? "#90D090" : "#1A5A1A";
+  QString delFg   = dark ? "#D09090" : "#6A1A1A";
+
+  // ── Part 1: Hunk diff (styled exactly like diff view) ──────────────────
+  QString html = QString(
+      "<html><body style='background:%1; color:%2; margin:0; padding:0;'>")
+      .arg(docBg, docFg);
+
+  // Monospace pre block for the whole diff
+  html += QString("<pre style='font-family:monospace; font-size:12px;"
+                  " margin:0; padding:0; line-height:1.4;'>");
+
+  for (const QString &line : hunkText.split('\n')) {
+    if (line.isEmpty()) continue;
+    char origin = line[0].toLatin1();
+    QString rest = line.mid(1).toHtmlEscaped();
+
+    if (origin == '@') {
+      // Hunk header — same style as diff view header bar
+      html += QString("<div style='background:%1; color:%2;"
+                      " padding:2px 8px; font-weight:600;'>%3</div>")
+                  .arg(hdrBg, hdrFg, line.toHtmlEscaped());
+    } else if (origin == '+') {
+      html += QString("<div style='background:%1; padding:0 8px;'>"
+                      "<span style='color:%2; user-select:none;'>+</span>%3</div>")
+                  .arg(addBg, plusCol, rest);
+    } else if (origin == '-') {
+      html += QString("<div style='background:%1; padding:0 8px;'>"
+                      "<span style='color:%2; user-select:none;'>-</span>%3</div>")
+                  .arg(delBg, minCol, rest);
+    } else {
+      html += QString("<div style='padding:0 8px;'> %1</div>").arg(rest);
+    }
+  }
+  html += "</pre>";
+
+  // ── Divider ─────────────────────────────────────────────────────────────
+  html += QString("<div style='height:1px; background:%1; margin:0;'></div>").arg(divCol);
+
+  // ── Part 2: AI explanation ───────────────────────────────────────────────
+  html += QString("<div style='background:%1; padding:12px 16px;'>").arg(expBg);
+
+  // Render AI text as markdown
+  bool inList = false, inFence = false;
+  static QRegularExpression headRe(R"(^(#{1,4})\s*(.*))");
+  auto closeList = [&] { if (inList) { html += "</ul>"; inList = false; } };
+
+  for (const QString &raw : aiText.split('\n')) {
+    if (raw.trimmed().startsWith("```")) {
+      closeList();
+      if (!inFence) {
+        html += QString("<pre style='background:%1; border-left:3px solid %2;"
+                        " margin:6px 0; padding:5px 10px; font-family:monospace;"
+                        " font-size:12px; border-radius:0 3px 3px 0;'>")
+                    .arg(codeBg, codeCol);
+        inFence = true;
+      } else { html += "</pre>"; inFence = false; }
+      continue;
+    }
+    if (inFence) { html += raw.toHtmlEscaped() + "\n"; continue; }
+
+    QString t = raw.trimmed();
+    if (t.isEmpty()) { closeList(); html += "<div style='height:6px;'></div>"; continue; }
+
+    QRegularExpressionMatch hm = headRe.match(raw);
+    if (hm.hasMatch()) {
+      closeList();
+      html += QString("<p style='margin:10px 0 3px; font-weight:600;"
+                      " font-size:13px; color:%1;'>%2</p>")
+                  .arg(head, explainMdInline(hm.captured(2), codeCol, codeBg));
+      continue;
+    }
+    if (t.startsWith("- ") || t.startsWith("* ")) {
+      if (!inList) { html += "<ul style='margin:4px 0; padding-left:20px;'>"; inList = true; }
+      html += "<li style='margin:2px 0; line-height:1.5;'>" +
+              explainMdInline(t.mid(2), codeCol, codeBg) + "</li>";
+      continue;
+    }
+    closeList();
+    html += "<p style='margin:3px 0; line-height:1.55;'>" +
+            explainMdInline(t, codeCol, codeBg) + "</p>";
+  }
+  closeList();
+  if (inFence) html += "</pre>";
+
+  html += "</div></body></html>";
+  return html;
+}
+
+void HunkWidget::explainHunk() {
+  QString hunkText;
+  if (mIndex >= 0) {
+    hunkText = mPatch.header(mIndex);
+    for (int i = 0; i < mPatch.lineCount(mIndex); ++i) {
+      char origin = mPatch.lineOrigin(mIndex, i);
+      hunkText += QString(origin) + QString::fromUtf8(mPatch.lineContent(mIndex, i));
+    }
+  }
+
+  if (hunkText.trimmed().isEmpty()) {
+    QMessageBox::information(this, tr("Explain Hunk"), tr("No hunk content to explain."));
+    return;
+  }
+
+  QString prompt =
+      QStringLiteral("Explain what this git diff hunk does and why this change might have been made. "
+                     "Be concise and clear. Focus on the intent and effect of the change.\n\n") +
+      hunkText;
+
+  AiService::instance()->chat(prompt, 512,
+      [this, hunkText](const QString &aiText, const QString &error) {
+    if (!error.isEmpty()) {
+      QMessageBox::warning(this, tr("Explain Hunk"),
+                           tr("Request failed: %1").arg(error));
+      return;
+    }
+
+    QDialog *dlg = new QDialog(window());
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setWindowTitle(tr("Hunk Explanation"));
+    dlg->resize(660, 480);
+
+    QTextBrowser *view = new QTextBrowser(dlg);
+    view->setOpenLinks(false);
+    view->setFrameShape(QFrame::NoFrame);
+    view->setHtml(renderExplainHtml(hunkText, aiText));
+
+    QPushButton *closeBtn = new QPushButton(tr("Close"), dlg);
+    connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::accept);
+
+    QVBoxLayout *layout = new QVBoxLayout(dlg);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    layout->addWidget(view, 1);
+
+    QHBoxLayout *btnRow = new QHBoxLayout;
+    btnRow->setContentsMargins(8, 8, 8, 8);
+    btnRow->addStretch();
+    btnRow->addWidget(closeBtn);
+    layout->addLayout(btnRow);
+
+    dlg->show();
+  });
 }

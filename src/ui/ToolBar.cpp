@@ -719,6 +719,43 @@ static Hotkey terminalHotkey = HotkeyManager::registerHotkey(
 static Hotkey fileManagerHotkey = HotkeyManager::registerHotkey(
     nullptr, "tools/fileManager", "Tools/Open File Manager");
 
+class ChatButton : public Button {
+public:
+  ChatButton(QWidget *parent = nullptr) : Button(parent) {}
+
+  void paintEvent(QPaintEvent *event) {
+    Button::paintEvent(event);
+
+    QStyleOptionToolButton opt;
+    initStyleOption(&opt);
+    QColor color = opt.palette.buttonText().color();
+
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(QPen(color, 1.5));
+
+    qreal x = width() / 2.0;
+    qreal y = height() / 2.0;
+
+    // Speech bubble outline
+    QRectF bubble(x - 9, y - 8, 18, 13);
+    p.drawRoundedRect(bubble, 3, 3);
+
+    // Tail
+    QPolygonF tail;
+    tail << QPointF(x - 5, y + 5)
+         << QPointF(x - 9, y + 8)
+         << QPointF(x - 2, y + 5);
+    p.drawPolygon(tail);
+
+    // Three dots inside bubble
+    p.setPen(Qt::NoPen);
+    p.setBrush(color);
+    for (int i = -1; i <= 1; ++i)
+      p.drawEllipse(QPointF(x + i * 4, y - 1.5), 1.2, 1.2);
+  }
+};
+
 } // namespace
 
 ToolBar::ToolBar(MainWindow *parent) : QToolBar(parent) {
@@ -854,6 +891,16 @@ ToolBar::ToolBar(MainWindow *parent) : QToolBar(parent) {
   QShortcut *shortcut = new QShortcut(this);
   terminalHotkey.use(shortcut);
   connect(shortcut, &QShortcut::activated, mTerminalButton, &Button::click);
+
+  addWidget(new Spacer(4, this));
+
+  mChatButton = new ChatButton(this);
+  mChatButton->setToolTip(tr("Toggle AI Chat (Ctrl+Shift+C)"));
+  addWidget(mChatButton);
+  connect(mChatButton, &Button::clicked, [this] {
+    if (RepoView *view = currentView())
+      view->setChatVisible(!view->isChatVisible());
+  });
 
   addWidget(new Spacer(4, this));
 
@@ -1010,6 +1057,7 @@ void ToolBar::updateView() {
   RepoView *view = currentView();
   mTerminalButton->setEnabled(view);
   mFileManagerButton->setEnabled(view);
+  if (mChatButton) mChatButton->setEnabled(view);
   mRepoConfigAction->setEnabled(view);
   mLogButton->setEnabled(view);
   // mModeGroup->button(RepoView::Diff)->setEnabled(view);

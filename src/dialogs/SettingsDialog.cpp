@@ -15,6 +15,9 @@
 #include "PluginsPanel.h"
 #include "app/Application.h"
 #include "app/CustomTheme.h"
+#include "ai/CodebaseIndex.h"
+#include "ai/KnowledgeBase.h"
+#include "ai/RepoAnalyzer.h"
 #include "conf/Settings.h"
 #include "cred/CredentialHelper.h"
 #include "git/Config.h"
@@ -37,6 +40,7 @@
 #include <QFile>
 #include <QFontComboBox>
 #include <QFormLayout>
+#include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
@@ -45,6 +49,10 @@
 #include <QPushButton>
 #include <QSaveFile>
 #include <QShortcut>
+#include <QSlider>
+#include <QSqlDatabase>
+#include <QScrollArea>
+#include <QSqlQuery>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStandardItemModel>
@@ -265,12 +273,6 @@ public:
 
     auto currentHelper = config.value<QString>("credential.helper");
     auto checked = CredentialHelper::isHelperValid(currentHelper);
-    if (!checked) {
-      QMessageBox msg(QMessageBox::Information, tr("No credential store set"),
-                      tr("No credential store is set. Go to the application "
-                         "settings to set the desired credential store"));
-      msg.exec();
-    }
     mStoreCredentials->setChecked(checked);
 
     QString info = tr("") + "<table>";
@@ -855,6 +857,322 @@ private:
 };
 #endif
 
+class AiPanel : public QWidget {
+  Q_OBJECT
+
+public:
+  QSize sizeHint() const override { return QSize(400, 350); }
+
+  AiPanel(QWidget *parent = nullptr) : QWidget(parent) {
+    Settings *settings = Settings::instance();
+
+    mProvider = new QComboBox(this);
+    mProvider->addItem(tr("Anthropic (Claude API)"), QStringLiteral("anthropic"));
+    mProvider->addItem(tr("Ollama (local / LAN)"), QStringLiteral("ollama"));
+
+    QString currentProvider = settings->value(Setting::Id::AiProvider).toString();
+    if (currentProvider.isEmpty())
+      currentProvider = QStringLiteral("anthropic");
+    mProvider->setCurrentIndex(currentProvider == QLatin1String("ollama") ? 1 : 0);
+
+    // Anthropic fields
+    mAnthropicWidget = new QWidget(this);
+    QFormLayout *anthropicLayout = new QFormLayout(mAnthropicWidget);
+    anthropicLayout->setContentsMargins(0, 0, 0, 0);
+
+    mApiKey = new QLineEdit(settings->value(Setting::Id::AiApiKey).toString(), mAnthropicWidget);
+    mApiKey->setEchoMode(QLineEdit::Password);
+    mApiKey->setPlaceholderText(tr("sk-ant-…"));
+    connect(mApiKey, &QLineEdit::textChanged, [](const QString &text) {
+      Settings::instance()->setValue(Setting::Id::AiApiKey, text);
+    });
+
+    mModel = new QLineEdit(mAnthropicWidget);
+    QString model = settings->value(Setting::Id::AiModel).toString();
+    mModel->setText(model.isEmpty() ? QStringLiteral("claude-opus-4-8") : model);
+    connect(mModel, &QLineEdit::textChanged, [](const QString &text) {
+      Settings::instance()->setValue(Setting::Id::AiModel, text);
+    });
+
+    anthropicLayout->addRow(tr("API Key:"), mApiKey);
+    anthropicLayout->addRow(tr("Model:"), mModel);
+
+    // Ollama fields
+    mOllamaWidget = new QWidget(this);
+    QFormLayout *ollamaLayout = new QFormLayout(mOllamaWidget);
+    ollamaLayout->setContentsMargins(0, 0, 0, 0);
+
+    mOllamaUrl = new QLineEdit(mOllamaWidget);
+    QString ollamaUrl = settings->value(Setting::Id::AiOllamaUrl).toString();
+    mOllamaUrl->setText(ollamaUrl.isEmpty() ? QStringLiteral("http://localhost:11434") : ollamaUrl);
+    mOllamaUrl->setPlaceholderText(tr("http://localhost:11434"));
+    connect(mOllamaUrl, &QLineEdit::textChanged, [](const QString &text) {
+      Settings::instance()->setValue(Setting::Id::AiOllamaUrl, text);
+    });
+
+    mOllamaModel = new QLineEdit(mOllamaWidget);
+    QString ollamaModel = settings->value(Setting::Id::AiOllamaModel).toString();
+    mOllamaModel->setText(ollamaModel.isEmpty() ? QStringLiteral("llama3") : ollamaModel);
+    connect(mOllamaModel, &QLineEdit::textChanged, [](const QString &text) {
+      Settings::instance()->setValue(Setting::Id::AiOllamaModel, text);
+    });
+
+    ollamaLayout->addRow(tr("Server URL:"), mOllamaUrl);
+    ollamaLayout->addRow(tr("Model:"), mOllamaModel);
+
+    // --- Knowledge Base group ---
+    QGroupBox *kbGroup = new QGroupBox(tr("Knowledge Base"), this);
+    QFormLayout *kbLayout = new QFormLayout(kbGroup);
+
+    mKbEnabled = new QCheckBox(tr("Enable local knowledge base"), kbGroup);
+    mKbEnabled->setToolTip(
+        tr("Cache review findings locally to skip redundant API calls"));
+    mKbEnabled->setChecked(
+        settings->value(Setting::Id::AiKnowledgeBaseEnabled).toBool());
+    connect(mKbEnabled, &QCheckBox::toggled, [](bool checked) {
+      Settings::instance()->setValue(Setting::Id::AiKnowledgeBaseEnabled,
+                                    checked);
+    });
+
+    mSimilaritySlider = new QSlider(Qt::Horizontal, kbGroup);
+    mSimilaritySlider->setRange(50, 100);
+    double threshold =
+        settings->value(Setting::Id::AiKnowledgeBaseSimilarityThreshold)
+            .toDouble();
+    if (threshold <= 0)
+      threshold = 0.85;
+    mSimilaritySlider->setValue(static_cast<int>(threshold * 100));
+    mSimilarityLabel = new QLabel(QString::number(threshold, 'f', 2), kbGroup);
+    mSimilarityLabel->setMinimumWidth(30);
+    connect(mSimilaritySlider, &QSlider::valueChanged, [this](int val) {
+      double v = val / 100.0;
+      mSimilarityLabel->setText(QString::number(v, 'f', 2));
+      Settings::instance()->setValue(
+          Setting::Id::AiKnowledgeBaseSimilarityThreshold, v);
+    });
+    QHBoxLayout *sliderRow = new QHBoxLayout;
+    sliderRow->addWidget(mSimilaritySlider, 1);
+    sliderRow->addWidget(mSimilarityLabel);
+
+    mEmbeddingModel = new QLineEdit(kbGroup);
+    QString embModel =
+        settings->value(Setting::Id::AiEmbeddingModel).toString();
+    mEmbeddingModel->setText(
+        embModel.isEmpty() ? QStringLiteral("nomic-embed-text") : embModel);
+    mEmbeddingModel->setPlaceholderText(QStringLiteral("nomic-embed-text"));
+    connect(mEmbeddingModel, &QLineEdit::textChanged, [](const QString &text) {
+      Settings::instance()->setValue(Setting::Id::AiEmbeddingModel, text);
+    });
+
+    mKbStatsLabel = new QLabel(kbGroup);
+    updateKbStats();
+
+    QPushButton *clearBtn =
+        new QPushButton(tr("Clear Knowledge Base"), kbGroup);
+    connect(clearBtn, &QPushButton::clicked, [this]() {
+      auto answer = QMessageBox::question(
+          this, tr("Clear Knowledge Base"),
+          tr("This will delete all cached findings and embeddings. Continue?"));
+      if (answer == QMessageBox::Yes) {
+        KnowledgeBase::instance()->clearAll();
+        updateKbStats();
+      }
+    });
+
+    kbLayout->addRow(mKbEnabled);
+    kbLayout->addRow(tr("Similarity threshold:"), sliderRow);
+    kbLayout->addRow(tr("Embedding model:"), mEmbeddingModel);
+    kbLayout->addRow(mKbStatsLabel);
+    kbLayout->addRow(clearBtn);
+
+    QWidget *inner = new QWidget(this);
+    QFormLayout *layout = new QFormLayout(inner);
+    layout->addRow(tr("Provider:"), mProvider);
+    layout->addRow(mAnthropicWidget);
+    layout->addRow(mOllamaWidget);
+    layout->addRow(kbGroup);
+
+    // --- Auto Analyzer group ---
+    QGroupBox *analyzerGroup =
+        new QGroupBox(tr("Continuous Repo Analysis"), this);
+    QFormLayout *analyzerLayout = new QFormLayout(analyzerGroup);
+
+    mAutoAnalyzeEnabled =
+        new QCheckBox(tr("Auto-analyze repos on changes"), analyzerGroup);
+    mAutoAnalyzeEnabled->setChecked(
+        settings->value(Setting::Id::AiAutoAnalyzeEnabled).toBool());
+    connect(mAutoAnalyzeEnabled, &QCheckBox::toggled, [](bool checked) {
+      Settings::instance()->setValue(Setting::Id::AiAutoAnalyzeEnabled,
+                                    checked);
+      RepoAnalyzer::instance()->setEnabled(checked);
+    });
+    analyzerLayout->addRow(mAutoAnalyzeEnabled);
+
+    mAnalyzeIntervalSlider = new QSlider(Qt::Horizontal, analyzerGroup);
+    mAnalyzeIntervalSlider->setRange(5, 60);
+    int intervalMins =
+        settings->value(Setting::Id::AiAutoAnalyzeInterval).toInt();
+    if (intervalMins < 5 || intervalMins > 60)
+      intervalMins = 10;
+    mAnalyzeIntervalSlider->setValue(intervalMins);
+    mAnalyzeIntervalLabel =
+        new QLabel(tr("%1 min").arg(intervalMins), analyzerGroup);
+
+    connect(mAnalyzeIntervalSlider, &QSlider::valueChanged, [this](int val) {
+      mAnalyzeIntervalLabel->setText(tr("%1 min").arg(val));
+      Settings::instance()->setValue(Setting::Id::AiAutoAnalyzeInterval, val);
+    });
+
+    QHBoxLayout *intervalRow = new QHBoxLayout;
+    intervalRow->addWidget(mAnalyzeIntervalSlider);
+    intervalRow->addWidget(mAnalyzeIntervalLabel);
+    analyzerLayout->addRow(tr("Check interval:"), intervalRow);
+
+    QPushButton *analyzeNow =
+        new QPushButton(tr("Analyze All Repos Now"), analyzerGroup);
+    connect(analyzeNow, &QPushButton::clicked, [] {
+      RepoAnalyzer::instance()->analyzeAllTracked();
+    });
+
+    mAnalyzerStatusLabel = new QLabel(analyzerGroup);
+    updateAnalyzerStatus();
+    connect(RepoAnalyzer::instance(), &RepoAnalyzer::progressChanged, this,
+            [this] { updateAnalyzerStatus(); });
+
+    analyzerLayout->addRow(analyzeNow);
+    analyzerLayout->addRow(mAnalyzerStatusLabel);
+
+    QLabel *recipeCountLabel = new QLabel(analyzerGroup);
+    QSqlDatabase db = QSqlDatabase::database("knowledge", false);
+    if (db.isOpen()) {
+      QSqlQuery rq(db);
+      rq.exec("SELECT COUNT(*) FROM fix_recipes");
+      int count = rq.next() ? rq.value(0).toInt() : 0;
+      recipeCountLabel->setText(tr("Fix recipes stored: %1").arg(count));
+    } else {
+      recipeCountLabel->setText(tr("Fix recipes stored: 0"));
+    }
+    analyzerLayout->addRow(recipeCountLabel);
+
+    layout->addRow(analyzerGroup);
+
+    // --- Codebase Index group ---
+    QGroupBox *indexGroup =
+        new QGroupBox(tr("Codebase Index (RAG)"), this);
+    QFormLayout *indexLayout = new QFormLayout(indexGroup);
+
+    mIndexStatsLabel = new QLabel(indexGroup);
+    updateIndexStats();
+
+    QPushButton *indexNow =
+        new QPushButton(tr("Index All Repos Now"), indexGroup);
+    connect(indexNow, &QPushButton::clicked, [this] {
+      CodebaseIndex::instance()->indexAllTracked(
+          [this](int current, int total) {
+            mIndexStatsLabel->setText(
+                tr("Indexing: %1/%2 chunks...").arg(current).arg(total));
+          },
+          [this](const QString &) { updateIndexStats(); });
+    });
+
+    QPushButton *clearIndex =
+        new QPushButton(tr("Clear Index"), indexGroup);
+    connect(clearIndex, &QPushButton::clicked, [this] {
+      CodebaseIndex::instance()->clearAll();
+      updateIndexStats();
+    });
+
+    QHBoxLayout *indexBtnRow = new QHBoxLayout;
+    indexBtnRow->addWidget(indexNow);
+    indexBtnRow->addWidget(clearIndex);
+
+    indexLayout->addRow(mIndexStatsLabel);
+    indexLayout->addRow(indexBtnRow);
+
+    layout->addRow(indexGroup);
+
+    QScrollArea *scroll = new QScrollArea(this);
+    scroll->setWidget(inner);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+
+    QVBoxLayout *outerLayout = new QVBoxLayout(this);
+    outerLayout->setContentsMargins(0, 0, 0, 0);
+    outerLayout->addWidget(scroll);
+
+    updateVisibility();
+
+    connect(mProvider, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) {
+              QString p = mProvider->currentData().toString();
+              Settings::instance()->setValue(Setting::Id::AiProvider, p);
+              updateVisibility();
+            });
+  }
+
+private:
+  void updateVisibility() {
+    bool ollama =
+        mProvider->currentData().toString() == QLatin1String("ollama");
+    mAnthropicWidget->setVisible(!ollama);
+    mOllamaWidget->setVisible(ollama);
+  }
+
+  void updateKbStats() {
+    KnowledgeBase::Stats st = KnowledgeBase::instance()->stats();
+    int total = st.cacheHits + st.cacheMisses;
+    double hitRate = total > 0 ? (100.0 * st.cacheHits / total) : 0;
+    mKbStatsLabel->setText(
+        tr("Findings: %1 | Reviews: %2 | Cache hit rate: %3% (%4/%5)")
+            .arg(st.totalFindings)
+            .arg(st.totalReviews)
+            .arg(hitRate, 0, 'f', 1)
+            .arg(st.cacheHits)
+            .arg(total));
+  }
+
+  QComboBox *mProvider;
+  QWidget *mAnthropicWidget;
+  QWidget *mOllamaWidget;
+  QLineEdit *mApiKey;
+  QLineEdit *mModel;
+  QLineEdit *mOllamaUrl;
+  QLineEdit *mOllamaModel;
+
+  void updateAnalyzerStatus() {
+    auto p = RepoAnalyzer::instance()->currentProgress();
+    if (p.running)
+      mAnalyzerStatusLabel->setText(
+          tr("Analyzing: %1 (%2/%3)")
+              .arg(p.currentRepo)
+              .arg(p.completedRepos)
+              .arg(p.totalRepos));
+    else
+      mAnalyzerStatusLabel->setText(tr("Idle"));
+  }
+
+  QCheckBox *mKbEnabled;
+  QSlider *mSimilaritySlider;
+  QLabel *mSimilarityLabel;
+  QLineEdit *mEmbeddingModel;
+  QLabel *mKbStatsLabel;
+
+  QCheckBox *mAutoAnalyzeEnabled;
+  QSlider *mAnalyzeIntervalSlider;
+  QLabel *mAnalyzeIntervalLabel;
+  QLabel *mAnalyzerStatusLabel;
+
+  QLabel *mIndexStatsLabel;
+  void updateIndexStats() {
+    CodebaseIndex::IndexStats st = CodebaseIndex::instance()->stats();
+    mIndexStatsLabel->setText(
+        tr("Repos: %1 | Files: %2 | Chunks: %3")
+            .arg(st.repoCount)
+            .arg(st.totalFiles)
+            .arg(st.totalChunks));
+  }
+};
+
 } // namespace
 
 SettingsDialog::SettingsDialog(Index index, QWidget *parent)
@@ -1008,6 +1326,14 @@ SettingsDialog::SettingsDialog(Index index, QWidget *parent)
 
   stack->addWidget(new TerminalPanel(this));
 #endif
+
+  // Add AI panel.
+  QAction *ai = toolbar->addAction(QIcon(":/plugins.png"), tr("AI"));
+  ai->setData(Ai);
+  ai->setActionGroup(actions);
+  ai->setCheckable(true);
+
+  stack->addWidget(new AiPanel(this));
 
   // Hook up edit button.
   connect(edit, &QPushButton::clicked, stack, [stack] {

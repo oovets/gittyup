@@ -59,6 +59,7 @@ private:
 
   QToolButton *mTerminalButton;
   QToolButton *mFileManagerButton;
+  QToolButton *mChatButton = nullptr;
   QToolButton *mLogButton;
   const QButtonGroup *mModeGroup;
 

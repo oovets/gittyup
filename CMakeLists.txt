@@ -119,6 +119,7 @@ set(QT_MODULES
     Gui
     Network
     PrintSupport
+    Sql
     Widgets
     Test)
 

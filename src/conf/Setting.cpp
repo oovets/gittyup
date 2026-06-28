@@ -44,6 +44,17 @@ void Setting::initialize(QMap<Id, QString> &keys) {
   keys[Id::ShowChangedFilesInSingleView] = "doubletreeview/single";
   keys[Id::ShowChangedFilesMultiColumn] = "doubletreeview/listviewmulticolumn";
   keys[Id::HideUntracked] = "untracked.hide";
+  keys[Id::AiApiKey] = "ai/apiKey";
+  keys[Id::AiModel] = "ai/model";
+  keys[Id::AiProvider] = "ai/provider";
+  keys[Id::AiOllamaUrl] = "ai/ollamaUrl";
+  keys[Id::AiOllamaModel] = "ai/ollamaModel";
+  keys[Id::AiKnowledgeBaseEnabled] = "ai/knowledgeBase/enabled";
+  keys[Id::AiKnowledgeBaseSimilarityThreshold] =
+      "ai/knowledgeBase/similarityThreshold";
+  keys[Id::AiEmbeddingModel] = "ai/embeddingModel";
+  keys[Id::AiAutoAnalyzeEnabled] = "ai/autoAnalyze/enabled";
+  keys[Id::AiAutoAnalyzeInterval] = "ai/autoAnalyze/intervalMinutes";
 }
 
 void Prompt::initialize(QMap<Kind, QString> &keys) {

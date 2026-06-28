@@ -499,6 +499,13 @@ MenuBar::MenuBar(QWidget *parent) : QMenuBar(parent) {
     view->setLogVisible(!view->isLogVisible());
   });
 
+  mToggleChat = viewMenu->addAction(tr("Show Chat"));
+  mToggleChat->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_C));
+  connect(mToggleChat, &QAction::triggered, [this] {
+    RepoView *view = this->view();
+    view->setChatVisible(!view->isChatVisible());
+  });
+
   mToggleMaximize = new StateAction(tr("Normal"), tr("Maximize"), viewMenu);
   viewMenu->addAction(mToggleMaximize);
   toggleMaximizeHotkey.use(mToggleMaximize);
@@ -1011,6 +1018,7 @@ void MenuBar::updateView() {
   RepoView *view = win ? win->currentView() : nullptr;
   mRefresh->setEnabled(view);
   mToggleLog->setEnabled(view);
+  mToggleChat->setEnabled(view);
   mToggleView->setEnabled(view);
   mToggleMaximize->setEnabled(view);
 
@@ -1019,6 +1027,8 @@ void MenuBar::updateView() {
 
   bool diff = (view->viewMode() == RepoView::DoubleTree);
   mToggleLog->setText(view->isLogVisible() ? tr("Hide Log") : tr("Show Log"));
+  mToggleChat->setText(view->isChatVisible() ? tr("Hide Chat")
+                                             : tr("Show Chat"));
   mToggleView->setText(diff ? tr("Show Tree View")
                             : tr("Show Double Tree View"));
 }

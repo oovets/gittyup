@@ -54,6 +54,7 @@ protected:
 signals:
   void stageStateChanged(int stageState);
   void discard();
+  void explainRequested();
 
 private:
   QCheckBox *mCheck;
@@ -180,6 +181,8 @@ private:
   QList<Token> tokens(int line) const;
   QByteArray tokenBuffer(const QList<Token> &tokens);
   void chooseLines(TextEditor::Marker kind);
+
+  void explainHunk();
 
   DiffView *mView;
   git::Patch mPatch;

@@ -8,6 +8,7 @@
 //
 
 #include "RepoView.h"
+#include "ChatPanel.h"
 #include "BlameEditor.h"
 #include "CommitList.h"
 #include "CommitToolBar.h"
@@ -428,14 +429,20 @@ RepoView::RepoView(const git::Repository &repo, MainWindow *parent)
   connect(mLogView->model(), &QAbstractItemModel::dataChanged, this,
           &RepoView::startLogTimer);
 
+  mChatPanel = new ChatPanel(mRepo, this);
+
   addWidget(mDetailSplitter);
+  addWidget(mChatPanel);
   addWidget(mLogView);
   setCollapsible(0, false);
   setStretchFactor(0, 1);
-  setSizes({1, 0});
+  setSizes({1, 0, 0});
 
-  connect(this, &QSplitter::splitterMoved,
-          [this] { mIsLogVisible = (sizes().last() > 0); });
+  connect(this, &QSplitter::splitterMoved, [this] {
+    QList<int> s = sizes();
+    mIsChatVisible = (s.size() > 1 && s.at(1) > 0);
+    mIsLogVisible = (s.size() > 2 && s.at(2) > 0);
+  });
 
   // Restore splitter state.
   mDetailSplitter->restoreState(QSettings().value(kSplitterKey).toByteArray());
@@ -886,14 +893,51 @@ void RepoView::setLogVisible(bool visible) {
   timeline->setEasingCurve(QEasingCurve(QEasingCurve::Linear));
   timeline->setUpdateInterval(20);
 
-  connect(timeline, &QTimeLine::valueChanged, this, [this, pos](qreal value) {
-    setSizes({1, static_cast<int>(pos * value)});
-  });
+  int chatSize = mIsChatVisible ? sizes().at(1) : 0;
+  connect(timeline, &QTimeLine::valueChanged, this,
+          [this, pos, chatSize](qreal value) {
+            setSizes({1, chatSize, static_cast<int>(pos * value)});
+          });
 
   connect(timeline, &QTimeLine::finished,
           [timeline] { timeline->deleteLater(); });
 
   timeline->start();
+}
+
+bool RepoView::isChatVisible() const { return mIsChatVisible; }
+
+ChatPanel *RepoView::chatPanel() const { return mChatPanel; }
+
+void RepoView::setChatVisible(bool visible) {
+  if (visible == mIsChatVisible)
+    return;
+
+  mIsChatVisible = visible;
+
+  toolBar()->updateView();
+  MenuBar::instance(this)->updateView();
+
+  int pos = visible ? 300 : sizes().at(1);
+
+  QTimeLine *timeline = new QTimeLine(250, this);
+  timeline->setDirection(visible ? QTimeLine::Forward : QTimeLine::Backward);
+  timeline->setEasingCurve(QEasingCurve(QEasingCurve::Linear));
+  timeline->setUpdateInterval(20);
+
+  int logSize = mIsLogVisible ? sizes().last() : 0;
+  connect(timeline, &QTimeLine::valueChanged, this,
+          [this, pos, logSize](qreal value) {
+            setSizes({1, static_cast<int>(pos * value), logSize});
+          });
+
+  connect(timeline, &QTimeLine::finished,
+          [timeline] { timeline->deleteLater(); });
+
+  timeline->start();
+
+  if (visible)
+    mChatPanel->findChild<QLineEdit *>()->setFocus();
 }
 
 LogEntry *RepoView::addLogEntry(const QString &text, const QString &title,

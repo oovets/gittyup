@@ -18,6 +18,9 @@
 #include "app/Application.h"
 #include "conf/Settings.h"
 #include "dialogs/MergeDialog.h"
+#include "CodeReviewDialog.h"
+#include "ai/AiService.h"
+#include "ai/CodebaseIndex.h"
 #include "index/Index.h"
 #include "git/Branch.h"
 #include "git/Commit.h"
@@ -33,6 +36,7 @@
 #include <QAbstractListModel>
 #include <QApplication>
 #include <QMenu>
+#include <QMessageBox>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPushButton>
@@ -1650,6 +1654,70 @@ void CommitList::contextMenuEvent(QContextMenuEvent *event) {
 
       menu.addAction(tr("Cherry-pick"),
                      [view, commit] { view->cherryPick(commit); });
+
+      menu.addSeparator();
+
+      QAction *reviewAction = menu.addAction(
+          tr("Review Code"), [view, commit] {
+            git::Diff d = commit.diff();
+            if (!d.isValid())
+              return;
+
+            QByteArray diffBytes = d.print();
+            if (diffBytes.trimmed().isEmpty())
+              return;
+
+            if (diffBytes.size() > 32000)
+              diffBytes = diffBytes.left(32000);
+
+            QString sha = commit.id().toString().left(8);
+
+            auto doReview = [view, diffBytes, sha](const QString &context) {
+              QString prompt =
+                  QStringLiteral(
+                      "Review the following git diff for commit %1. "
+                      "Analyze for bugs, security vulnerabilities, "
+                      "and code quality issues.\n"
+                      "For each issue found:\n"
+                      "- State severity: CRITICAL / HIGH / MEDIUM / LOW\n"
+                      "- Identify the file and approximate line\n"
+                      "- Explain the problem concisely\n"
+                      "- Suggest a fix\n\n"
+                      "If no issues are found, say so clearly.\n\n")
+                          .arg(sha);
+
+              if (!context.isEmpty())
+                prompt += context + "\n";
+
+              prompt += QString::fromUtf8(diffBytes);
+
+              AiService::instance()->chat(prompt, 4096,
+                  [view, diffBytes, sha](const QString &text,
+                                         const QString &error) {
+                    if (!error.isEmpty()) {
+                      QMessageBox::warning(
+                          view, QObject::tr("Code Review"),
+                          QObject::tr("Request failed: %1").arg(error));
+                      return;
+                    }
+
+                    CodeReviewDialog *dlg = new CodeReviewDialog(
+                        text, diffBytes, sha, view->repo(), view);
+                    dlg->open();
+                  });
+            };
+
+            CodebaseIndex *idx = CodebaseIndex::instance();
+            if (idx->stats().totalChunks > 0) {
+              idx->searchSimilar(
+                  QString::fromUtf8(diffBytes).left(2000), 5,
+                  [doReview, idx](QList<CodebaseIndex::SearchResult> results) {
+                    doReview(idx->buildContext(results));
+                  });
+            } else {
+              doReview({});
+            }
+          });
 
       menu.addSeparator();
 

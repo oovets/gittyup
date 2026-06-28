@@ -68,6 +68,16 @@ public:
     ShowChangedFilesInSingleView,
     HideUntracked,
     Language,
+    AiApiKey,
+    AiModel,
+    AiProvider,
+    AiOllamaUrl,
+    AiOllamaModel,
+    AiKnowledgeBaseEnabled,
+    AiKnowledgeBaseSimilarityThreshold,
+    AiEmbeddingModel,
+    AiAutoAnalyzeEnabled,
+    AiAutoAnalyzeInterval,
   };
   Q_ENUM(Id)
 

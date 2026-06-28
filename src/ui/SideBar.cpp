@@ -19,8 +19,17 @@
 #include "dialogs/AccountDialog.h"
 #include "dialogs/CloneDialog.h"
 #include "host/Accounts.h"
+#include "SshDialog.h"
+#include "RemoteCallbacks.h"
+#include "git/Remote.h"
+#include "git/Repository.h"
+#include "log/LogEntry.h"
 #include <QAbstractItemModel>
+#include <QDir>
 #include <QFileDialog>
+#include <QStandardPaths>
+#include <QFutureWatcher>
+#include <QtConcurrent>
 #include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
@@ -97,7 +106,9 @@ public:
 
   RepoModel(TabWidget *tabs, QObject *parent = nullptr)
       : QAbstractItemModel(parent), mTabs(tabs), mCloudIcon(":/cloud.png"),
-        mErrorIcon(tabs->style()->standardIcon(QStyle::SP_MessageBoxCritical)) {
+        mErrorIcon(tabs->style()->standardIcon(QStyle::SP_MessageBoxCritical)),
+        mSshIcon(":/terminal.png"),
+        mSshBase(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/ssh-repos/") {
     connect(tabs, &TabWidget::tabAboutToBeInserted, this,
             &RepoModel::beginResetModel);
     connect(tabs, &TabWidget::tabAboutToBeRemoved, this,
@@ -384,6 +395,16 @@ public:
           return QVariant();
 
         switch (parent.row()) {
+          case Repo: {
+            if (mTabs->count()) {
+              RepoView *view = static_cast<RepoView *>(mTabs->widget(row));
+              QString path = view->repo().dir(false).path();
+              if (path.startsWith(mSshBase))
+                return mSshIcon;
+            }
+            return QVariant();
+          }
+
           case Remote: {
             Accounts *accounts = Accounts::instance();
             if (accounts->count())
@@ -547,6 +568,8 @@ private:
 
   QIcon mCloudIcon;
   QIcon mErrorIcon;
+  QIcon mSshIcon;
+  QString mSshBase;
 };
 
 // Does this index correspond to one of the open repositories?
@@ -732,6 +755,47 @@ SideBar::SideBar(TabWidget *tabs, MainWindow *mainWindow, QWidget *parent)
     dialog->setOption(QFileDialog::ShowDirsOnly);
     connect(dialog, &QFileDialog::fileSelected,
             [](const QString &path) { MainWindow::open(path); });
+    dialog->open();
+  });
+
+  QAction *sshOpen = plusMenu->addAction(tr("Open SSH Repository…"));
+  connect(sshOpen, &QAction::triggered, [this] {
+    SshDialog *dialog = new SshDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    connect(dialog, &SshDialog::accepted, [this, dialog] {
+      QString url = dialog->sshUrl();
+      QString local = dialog->localPath();
+
+      // If already cloned, just open
+      if (git::Repository::open(local).isValid()) {
+        MainWindow::open(local);
+        return;
+      }
+
+      // Clone in background using same SSH auth as rest of app
+      QDir().mkpath(QFileInfo(local).absolutePath());
+      LogEntry *log = new LogEntry(this);
+      LogEntry *entry = log->addEntry(url, tr("Clone"));
+      RemoteCallbacks *cb = new RemoteCallbacks(RemoteCallbacks::Receive,
+                                                entry, url, QString(), this);
+      auto *watcher = new QFutureWatcher<git::Result>(this);
+      connect(watcher, &QFutureWatcher<git::Result>::finished, this,
+              [this, watcher, cb, log, local, url] {
+                git::Result result = watcher->result();
+                if (result) {
+                  MainWindow::open(local);
+                } else {
+                  QMessageBox::warning(this, tr("Clone Failed"),
+                                       tr("Could not clone %1:\n%2")
+                                           .arg(url, result.errorString()));
+                }
+                cb->deleteLater();
+                log->deleteLater();
+                watcher->deleteLater();
+              });
+      watcher->setFuture(
+          QtConcurrent::run(&git::Remote::clone, cb, url, local, false));
+    });
     dialog->open();
   });
 
