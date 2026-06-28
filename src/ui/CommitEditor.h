@@ -26,6 +26,7 @@ class CommitEditor : public QFrame {
 public:
   CommitEditor(const git::Repository &repo, QWidget *parent = nullptr);
   void commit(bool force = false);
+  void commitAndPush();
   void abortRebase();
   void continueRebase();
   bool isRebaseAbortVisible() const;
@@ -62,6 +63,7 @@ private:
   QPushButton *mStage;
   QPushButton *mUnstage;
   QPushButton *mCommit;
+  QPushButton *mCommitAndPush;
   QPushButton *mRebaseAbort;
   QPushButton *mRebaseContinue;
   QPushButton *mMergeAbort;

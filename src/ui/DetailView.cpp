@@ -15,6 +15,7 @@
 #include "DoubleTreeWidget.h"
 #include "TreeWidget.h"
 #include "CommitEditor.h"
+#include "ai/AiService.h"
 #include "conf/Settings.h"
 #include "git/Commit.h"
 #include "git/Config.h"
@@ -240,9 +241,16 @@ public:
     mParents = new QLabel(this);
     mParents->setTextInteractionFlags(kTextFlags);
 
+    mSummarize = new QToolButton(this);
+    mSummarize->setText(tr("Summarize"));
+    mSummarize->setToolTip(tr("Generate an AI summary of this commit"));
+    connect(mSummarize, &QToolButton::clicked, this,
+            &CommitDetail::summarizeCommit);
+
     QHBoxLayout *line3 = new QHBoxLayout;
     line3->addWidget(mHash);
     line3->addWidget(copy);
+    line3->addWidget(mSummarize);
     line3->addWidget(mParents);
     line3->addStretch();
     line3->addWidget(mRefs);
@@ -267,10 +275,16 @@ public:
     connect(mMessage, &QTextEdit::copyAvailable, MenuBar::instance(this),
             &MenuBar::updateCutCopyPaste);
 
+    mSummary = new QLabel(this);
+    mSummary->setWordWrap(true);
+    mSummary->setTextInteractionFlags(kTextFlags);
+    mSummary->setVisible(false);
+
     QVBoxLayout *layout = new QVBoxLayout(this);
     layout->addLayout(header);
     layout->addWidget(mSeparator);
     layout->addWidget(mMessage);
+    layout->addWidget(mSummary);
 
     connect(&mMgr, &QNetworkAccessManager::finished, this,
             &CommitDetail::setPicture);
@@ -321,10 +335,14 @@ public:
     mParents->setText(QString());
     mMessage->setPlainText(QString());
     mPicture->setPixmap(QPixmap());
+    mSummary->setVisible(false);
+    mSummary->clear();
+    mCurrentCommit = git::Commit();
 
     mParents->setVisible(false);
     mSeparator->setVisible(false);
     mMessage->setVisible(false);
+    mSummarize->setVisible(false);
 
     // Reset references.
     setReferences(commits);
@@ -387,6 +405,7 @@ public:
     mParents->setVisible(true);
     mSeparator->setVisible(true);
     mMessage->setVisible(true);
+    mSummarize->setVisible(true);
 
     // Populate details.
     git::Commit commit = commits.first();
@@ -439,8 +458,9 @@ public:
       }
     }
 
-    // Remember the id.
+    // Remember the id and commit.
     mId = commit.id().toString();
+    mCurrentCommit = commit;
   }
 
   void setPicture(QNetworkReply *reply) {
@@ -473,6 +493,44 @@ public:
     mWatcher.waitForFinished();
   }
 
+private slots:
+  void summarizeCommit() {
+    if (!mCurrentCommit.isValid())
+      return;
+
+    git::Diff d = mCurrentCommit.diff();
+    QByteArray diffBytes = d.isValid() ? d.print() : QByteArray{};
+    if (diffBytes.size() > 16000)
+      diffBytes = diffBytes.left(16000) + "\n[diff truncated]";
+
+    QString sha = mCurrentCommit.shortId();
+    QString author = mCurrentCommit.author().name();
+    QString msg = mCurrentCommit.message();
+
+    QString prompt = QStringLiteral(
+        "Summarize the following git commit in 3-5 concise bullet points.\n"
+        "Focus on WHAT changed and WHY.\n"
+        "Use plain language.\n\n"
+        "Commit: %1\nAuthor: %2\nMessage: %3\n\nDiff:\n%4")
+        .arg(sha, author, msg, QString::fromUtf8(diffBytes));
+
+    mSummarize->setEnabled(false);
+    mSummarize->setText(tr("Summarizing…"));
+    mSummary->setText(tr("Generating summary…"));
+    mSummary->setVisible(true);
+
+    AiService::instance()->chat(prompt, 1024,
+        [this](const QString &reply, const QString &error) {
+          mSummarize->setEnabled(true);
+          mSummarize->setText(tr("Summarize"));
+          if (!error.isEmpty()) {
+            mSummary->setText(tr("Error: %1").arg(error));
+          } else {
+            mSummary->setText(reply);
+          }
+        });
+  }
+
 private:
   Badge *mRefs;
   QLabel *mHash;
@@ -480,9 +538,12 @@ private:
   QLabel *mPicture;
   QFrame *mSeparator;
   QTextEdit *mMessage;
+  QLabel *mSummary;
+  QToolButton *mSummarize;
   AuthorCommitterDate *mAuthorCommitterDate;
 
   QString mId;
+  git::Commit mCurrentCommit;
   QNetworkAccessManager mMgr;
   QMap<QByteArray, QPixmap> mCache;
   QFutureWatcher<QString> mWatcher;

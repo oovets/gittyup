@@ -530,6 +530,10 @@ CommitEditor::CommitEditor(const git::Repository &repo, QWidget *parent)
   mCommit->setDefault(true);
   connect(mCommit, &QPushButton::clicked, this, &CommitEditor::commit);
 
+  mCommitAndPush = new QPushButton(tr("Commit && Push"), this);
+  connect(mCommitAndPush, &QPushButton::clicked, this,
+          &CommitEditor::commitAndPush);
+
   mRebaseAbort = new QPushButton(tr("Abort rebasing"), this);
   mRebaseAbort->setObjectName("AbortRebase");
   connect(mRebaseAbort, &QPushButton::clicked, this,
@@ -562,6 +566,7 @@ CommitEditor::CommitEditor(const git::Repository &repo, QWidget *parent)
   buttonLayout->addWidget(mAiHistory);
   buttonLayout->addWidget(mAiChat);
   buttonLayout->addWidget(mCommit);
+  buttonLayout->addWidget(mCommitAndPush);
   buttonLayout->addWidget(mRebaseContinue);
   buttonLayout->addWidget(mRebaseAbort);
   buttonLayout->addWidget(mMergeAbort);
@@ -583,6 +588,21 @@ void CommitEditor::commit(bool force) {
 
   if (view->commit(mMessage->toPlainText(), upstream, nullptr, force))
     mMessage->clear(); // Clear the message field.
+}
+
+void CommitEditor::commitAndPush() {
+  mDiff.setAllStaged(true);
+
+  RepoView *view = RepoView::parentView(this);
+  git::AnnotatedCommit upstream;
+  if (git::Reference mergeHead = view->repo().lookupRef("MERGE_HEAD"))
+    upstream = mergeHead.annotatedCommit();
+
+  if (!view->commit(mMessage->toPlainText(), upstream))
+    return;
+
+  mMessage->clear();
+  view->push();
 }
 
 void CommitEditor::abortRebase() {
@@ -815,8 +835,7 @@ void CommitEditor::reviewCode() {
     }
   }
 
-  mAiReview->setEnabled(false);
-  mAiReview->setText(tr("Reviewing..."));
+  mReviewSpinner->start(tr("Reviewing…"));
 
   // Step 2: Semantic similarity check (async)
   if (kb->isEnabled()) {
@@ -826,8 +845,7 @@ void CommitEditor::reviewCode() {
           [this, diff, kb](KnowledgeBase::MatchResult result) {
         if (result.sufficient) {
           kb->incrementCacheHits();
-          mAiReview->setEnabled(true);
-          mAiReview->setText(tr("Review Code"));
+          mReviewSpinner->stop();
 
           QString composed =
               FindingParser::composeReviewFromFindings(result.findings);
@@ -871,8 +889,7 @@ void CommitEditor::performFullReview(const QByteArray &diff) {
 
     AiService::instance()->chat(prompt, 1024,
         [this, diff](const QString &text, const QString &error) {
-      mAiReview->setEnabled(true);
-      mAiReview->setText(tr("Review Code"));
+      mReviewSpinner->stop();
 
       if (!error.isEmpty()) {
         QMessageBox::warning(this, tr("Code Review"),
@@ -956,6 +973,7 @@ void CommitEditor::updateButtons(bool yieldFocus) {
     mStage->setEnabled(false);
     mUnstage->setEnabled(false);
     mCommit->setEnabled(false);
+    mCommitAndPush->setEnabled(false);
     return;
   }
 
@@ -1030,21 +1048,27 @@ void CommitEditor::updateButtons(bool yieldFocus) {
   // Change commit button text for committing a merge.
   git::Repository repo = RepoView::parentView(this)->repo();
 
+  bool hasMessage = !mMessage->document()->isEmpty();
+  bool hasChanges = count > 0;
+
   switch (repo.state()) {
     case GIT_REPOSITORY_STATE_MERGE:
       mCommit->setText(tr("Commit Merge"));
-      mCommit->setEnabled(total && !mMessage->document()->isEmpty());
+      mCommit->setEnabled(total && hasMessage);
+      mCommitAndPush->setVisible(false);
       break;
     case GIT_REPOSITORY_STATE_REBASE:
     case GIT_REPOSITORY_STATE_REBASE_MERGE:
     case GIT_REPOSITORY_STATE_REBASE_INTERACTIVE:
       mCommit->setText(tr("Commit Rebase"));
-      mCommit->setEnabled(total && conflicted == 0 &&
-                          !mMessage->document()->isEmpty());
+      mCommit->setEnabled(total && conflicted == 0 && hasMessage);
+      mCommitAndPush->setVisible(false);
       break;
     default:
       mCommit->setText(tr("Commit"));
-      mCommit->setEnabled(total && !mMessage->document()->isEmpty());
+      mCommit->setEnabled(total && hasMessage);
+      mCommitAndPush->setVisible(true);
+      mCommitAndPush->setEnabled(hasChanges && hasMessage);
       break;
   }
 

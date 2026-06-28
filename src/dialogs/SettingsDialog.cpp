@@ -1067,12 +1067,27 @@ public:
     QPushButton *indexNow =
         new QPushButton(tr("Index All Repos Now"), indexGroup);
     connect(indexNow, &QPushButton::clicked, [this] {
+      QPointer<AiPanel> guard(this);
       CodebaseIndex::instance()->indexAllTracked(
-          [this](int current, int total) {
-            mIndexStatsLabel->setText(
-                tr("Indexing: %1/%2 chunks...").arg(current).arg(total));
+          [guard](int current, int total) {
+            if (!guard)
+              return;
+            QMetaObject::invokeMethod(guard, [guard, current, total] {
+              if (guard)
+                guard->mIndexStatsLabel->setText(
+                    QObject::tr("Indexing: %1/%2 chunks...")
+                        .arg(current)
+                        .arg(total));
+            });
           },
-          [this](const QString &) { updateIndexStats(); });
+          [guard](const QString &) {
+            if (!guard)
+              return;
+            QMetaObject::invokeMethod(guard, [guard] {
+              if (guard)
+                guard->updateIndexStats();
+            });
+          });
     });
 
     QPushButton *clearIndex =

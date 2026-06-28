@@ -320,9 +320,10 @@ void CodebaseIndex::indexRepo(
     model = QStringLiteral("nomic-embed-text");
   mEmbeddingClient->setModelName(model);
 
-  // Process one chunk at a time
-  std::function<void()> processNext;
-  processNext = [this, state, processNext]() {
+  // Process one chunk at a time (shared_ptr so the recursive lambda captures
+  // a live reference instead of a still-empty std::function copy).
+  auto processNext = std::make_shared<std::function<void()>>();
+  *processNext = [this, state, processNext]() {
     if (state->current >= state->total) {
       mIndexing = false;
       emit indexingFinished(state->repoPath, state->total);
@@ -346,11 +347,11 @@ void CodebaseIndex::indexRepo(
             state->progress(state->current, state->total);
           emit indexingProgress(state->repoPath, state->current, state->total);
 
-          processNext();
+          (*processNext)();
         });
   };
 
-  processNext();
+  (*processNext)();
 }
 
 // ---------------------------------------------------------------------------
@@ -378,8 +379,8 @@ void CodebaseIndex::indexAllTracked(
   }
 
   auto remaining = std::make_shared<QStringList>(repoPaths);
-  std::function<void()> next;
-  next = [this, remaining, progress, done, next]() {
+  auto next = std::make_shared<std::function<void()>>();
+  *next = [this, remaining, progress, done, next]() {
     if (remaining->isEmpty()) {
       if (done)
         done({});
@@ -387,10 +388,10 @@ void CodebaseIndex::indexAllTracked(
     }
 
     QString path = remaining->takeFirst();
-    indexRepo(path, progress, [next](const QString &) { next(); });
+    indexRepo(path, progress, [next](const QString &) { (*next)(); });
   };
 
-  next();
+  (*next)();
 }
 
 // ---------------------------------------------------------------------------

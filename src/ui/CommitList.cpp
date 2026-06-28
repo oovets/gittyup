@@ -39,9 +39,12 @@
 #include <QMessageBox>
 #include <QPainter>
 #include <QPainterPath>
+#include <QDialog>
 #include <QPushButton>
 #include <QStyledItemDelegate>
+#include <QTextBrowser>
 #include <QTextLayout>
+#include <QVBoxLayout>
 #include <QtConcurrent>
 
 namespace {
@@ -1717,6 +1720,54 @@ void CommitList::contextMenuEvent(QContextMenuEvent *event) {
             } else {
               doReview({});
             }
+          });
+
+      menu.addAction(
+          tr("Summarize Commit"), [view, commit] {
+            git::Diff d = commit.diff();
+            QByteArray diffBytes = d.isValid() ? d.print() : QByteArray{};
+            if (diffBytes.size() > 16000)
+              diffBytes = diffBytes.left(16000) + "\n[diff truncated]";
+
+            QString commitMsg = commit.message();
+            QString sha = commit.id().toString().left(8);
+            QString author = commit.author().name();
+            QString date = commit.author().date().toString(Qt::ISODate);
+
+            QString prompt = QStringLiteral(
+                "Summarize the following git commit in 3-5 bullet points.\n"
+                "Focus on WHAT changed and WHY (if inferable from context).\n"
+                "Be concise. Use plain language, not code jargon.\n\n"
+                "Commit: %1\nAuthor: %2\nDate: %3\n"
+                "Message: %4\n\nDiff:\n%5")
+                .arg(sha, author, date, commitMsg,
+                     QString::fromUtf8(diffBytes));
+
+            QDialog *dlg = new QDialog(view);
+            dlg->setAttribute(Qt::WA_DeleteOnClose);
+            dlg->setWindowTitle(QObject::tr("Commit Summary — %1").arg(sha));
+            dlg->resize(520, 320);
+
+            auto *layout = new QVBoxLayout(dlg);
+            auto *text = new QTextBrowser(dlg);
+            text->setOpenExternalLinks(true);
+            text->setPlainText(QObject::tr("Generating summary…"));
+            layout->addWidget(text);
+
+            auto *close = new QPushButton(QObject::tr("Close"), dlg);
+            connect(close, &QPushButton::clicked, dlg, &QDialog::accept);
+            layout->addWidget(close, 0, Qt::AlignRight);
+
+            dlg->show();
+
+            AiService::instance()->chat(prompt, 1024,
+                [text](const QString &reply, const QString &error) {
+                  if (!error.isEmpty())
+                    text->setPlainText(
+                        QObject::tr("Request failed: %1").arg(error));
+                  else
+                    text->setPlainText(reply);
+                });
           });
 
       menu.addSeparator();
