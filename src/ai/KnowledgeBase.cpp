@@ -80,6 +80,8 @@ void KnowledgeBase::initDatabase() {
       ")");
   q.exec("CREATE INDEX IF NOT EXISTS idx_reviews_diff_hash "
          "ON reviews(diff_hash)");
+  q.exec("CREATE INDEX IF NOT EXISTS idx_findings_model "
+         "ON findings(embedding_model)");
 
   q.exec(
       "CREATE TABLE IF NOT EXISTS review_findings ("
@@ -358,8 +360,10 @@ void KnowledgeBase::clearAll() {
 QByteArray KnowledgeBase::serializeEmbedding(const QVector<float> &v) {
   if (v.isEmpty())
     return {};
-  return QByteArray(reinterpret_cast<const char *>(v.constData()),
-                    v.size() * sizeof(float));
+  // Store unit-length vectors so similarity comparisons stay stable.
+  QVector<float> n = VectorMath::normalized(v);
+  return QByteArray(reinterpret_cast<const char *>(n.constData()),
+                    n.size() * sizeof(float));
 }
 
 QVector<float> KnowledgeBase::deserializeEmbedding(const QByteArray &blob) {

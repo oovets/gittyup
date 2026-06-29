@@ -70,6 +70,8 @@ void CodebaseIndex::initDatabase() {
          "ON file_chunks(repo_path)");
   q.exec("CREATE INDEX IF NOT EXISTS idx_chunks_file "
          "ON file_chunks(repo_path, file_path, file_sha)");
+  q.exec("CREATE INDEX IF NOT EXISTS idx_chunks_model "
+         "ON file_chunks(embedding_model)");
 }
 
 // ---------------------------------------------------------------------------
@@ -575,8 +577,10 @@ void CodebaseIndex::clearAll() {
 QByteArray CodebaseIndex::serializeEmbedding(const QVector<float> &v) {
   if (v.isEmpty())
     return {};
-  return QByteArray(reinterpret_cast<const char *>(v.constData()),
-                    v.size() * sizeof(float));
+  // Store unit-length vectors so similarity comparisons stay stable.
+  QVector<float> n = VectorMath::normalized(v);
+  return QByteArray(reinterpret_cast<const char *>(n.constData()),
+                    n.size() * sizeof(float));
 }
 
 QVector<float> CodebaseIndex::deserializeEmbedding(const QByteArray &blob) {

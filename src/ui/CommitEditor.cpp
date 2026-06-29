@@ -779,6 +779,56 @@ static QByteArray collectDiff(git::Diff staged, const git::Repository &repo, int
   return diff;
 }
 
+// Collect the full working-tree content of the files touched by `diff` so the
+// reviewer sees surrounding code (declarations, member initializers, helpers)
+// instead of only the changed lines. Without this the model frequently
+// "finds" issues that are actually handled just outside the hunk. Budgeted to
+// avoid blowing the model's context window.
+static QString buildChangedFilesContext(const QByteArray &diff,
+                                        const git::Repository &repo,
+                                        int budgetBytes = 20000) {
+  if (!repo.isValid())
+    return {};
+  const QString workdir = repo.workdir().path();
+
+  QStringList paths;
+  for (const QByteArray &line : diff.split('\n')) {
+    if (!line.startsWith("+++ "))
+      continue;
+    QByteArray p = line.mid(4).trimmed();
+    if (p.startsWith("b/"))
+      p = p.mid(2);
+    if (p.isEmpty() || p == "/dev/null")
+      continue;
+    const QString path = QString::fromUtf8(p);
+    if (!paths.contains(path))
+      paths.append(path);
+  }
+  if (paths.isEmpty())
+    return {};
+
+  QString context;
+  int used = 0;
+  for (const QString &path : paths) {
+    if (used >= budgetBytes)
+      break;
+    QFile f(workdir + "/" + path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+      continue;
+    const QByteArray content = f.read(qMin(budgetBytes - used, 8000));
+    f.close();
+    if (content.isEmpty())
+      continue;
+    context += "\n--- " + path + " (current file) ---\n";
+    context += QString::fromUtf8(content);
+    used += content.size();
+  }
+  if (context.isEmpty())
+    return {};
+  return QStringLiteral("Full content of the changed files, for context:\n") +
+         context;
+}
+
 void CommitEditor::generateAiMessage() {
   QByteArray diff = collectDiff(mDiff, mRepo, 12000);
   if (diff.isEmpty()) {
@@ -1004,8 +1054,16 @@ void CommitEditor::performFullReview(const QByteArray &diff) {
   RepoView *view = RepoView::parentView(this);
   DoubleTreeWidget *dtw = view ? view->doubleTreeWidget() : nullptr;
 
-  auto sendReview = [this, diff, dtw](const QString &codebaseContext) {
-    QString prompt = AiService::reviewPrompt(diff, {}, {}, codebaseContext);
+  QString changedFiles = buildChangedFilesContext(diff, mRepo);
+
+  auto sendReview = [this, diff, dtw, changedFiles](const QString &codebaseContext) {
+    QString context = changedFiles;
+    if (!codebaseContext.isEmpty()) {
+      if (!context.isEmpty())
+        context += QStringLiteral("\n\n");
+      context += codebaseContext;
+    }
+    QString prompt = AiService::reviewPrompt(diff, {}, {}, context);
 
     TaskDispatcher::instance()->submit(
         TaskDispatcher::TaskType::Review, prompt,
@@ -1028,11 +1086,16 @@ void CommitEditor::performFullReview(const QByteArray &diff) {
         TaskDispatcher::Priority::Normal, AiService::ReviewMaxTokens);
   };
 
-  // Search codebase index for relevant context
+  // Search codebase index for relevant context. Query with the actual changed
+  // hunks (the real code) rather than the first 2 KB of raw diff text, which is
+  // mostly +/-/@@ markers and file headers.
   CodebaseIndex *idx = CodebaseIndex::instance();
   CodebaseIndex::IndexStats st = idx->stats();
   if (st.totalChunks > 0) {
-    idx->searchSimilar(QString::fromUtf8(diff).left(2000), 5,
+    QStringList hunks = extractHunkTexts(diff);
+    QString ragQuery = hunks.isEmpty() ? QString::fromUtf8(diff).left(2000)
+                                       : hunks.join('\n').left(4000);
+    idx->searchSimilar(ragQuery, 5,
         [sendReview, idx](QList<CodebaseIndex::SearchResult> results) {
           QString context = idx->buildContext(results);
           sendReview(context);
