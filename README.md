@@ -20,11 +20,18 @@ The [latest development version](https://github.com/Murmele/Gittyup/releases/tag
 
 Gittyup is a continuation of the [GitAhead](https://github.com/gitahead/gitahead) client.
 
-![Gittyup](https://raw.githubusercontent.com/Murmele/Gittyup/master/rsrc/screenshots/main_dark_orig.png)
+> **This fork ([oovets/gittyup](https://github.com/oovets/gittyup))** extends Gittyup with an
+> AI-powered development assistant (code review, chat, commit-message generation,
+> codebase-aware context), a built-in **terminal emulator**, a merged repo/changes
+> sidebar, and a live status bar. See [AI & Productivity Features](#ai--productivity-features)
+> below.
+
+![Gittyup](rsrc/screenshots/ai_overview.png)
 
 Table of contents
 =================
 <!--ts-->
+   * [AI & Productivity Features](#ai--productivity-features)
    * [Features](#features)
    * [How to Get Help](#how-to-get-help)
    * [Build Environment](#build-environment)
@@ -35,6 +42,47 @@ Table of contents
    * [How to Contribute](#how-to-contribute)
    * [License](#license)
 <!--te-->
+
+AI & Productivity Features
+--------------------------
+
+This fork adds a full AI-powered development assistant backed by either
+[Ollama](https://ollama.com) (local / LAN) or the Anthropic Claude API, plus a
+real integrated terminal and several UI improvements. See the
+[CHANGELOG](CHANGELOG.md) for the complete list.
+
+**AI assistant**
+
+- **Code review** — review staged/unstaged diffs or any commit. Findings show
+  severity (CRITICAL / HIGH / MEDIUM / LOW), file/line references, and suggested
+  fixes. A 3-step cache (exact diff hash → semantic embedding similarity → full
+  LLM call) avoids redundant requests.
+- **Commit message generation** from the current diff (conventional commits).
+- **Per-hunk explanations** rendered inline in the diff view.
+- **Chat panel** docked in the repo view (`Ctrl+Shift+C`).
+- **Knowledge base & codebase RAG** — structured findings, embeddings, and
+  fix recipes stored locally in SQLite; the most relevant code chunks are
+  injected as context for deeper reviews.
+- **Background analysis** of recently-opened repositories on HEAD changes.
+
+**Integrated terminal**
+
+A built-in terminal emulator powered by [libvterm](https://www.leonerd.org.uk/code/libvterm/)
+(MIT) with a custom Qt renderer — 256-color/true-color, full ANSI rendering,
+scrollback, working tab-completion, and resize handling. Toggle it from
+**View → Show Terminal** (Ctrl + `` ` ``).
+
+![Integrated terminal](rsrc/screenshots/ai_terminal.png)
+
+**Merged sidebar & status bar**
+
+The sidebar shows each open repository's changed files as expandable children
+under the **OPEN** section (with a change count and per-file status), so changes
+live in the same list as the repos themselves. SSH repositories appear with a
+distinct icon. A live status bar at the bottom shows branch/tracking state, the
+active AI model, Ollama/GPU availability, and the task queue.
+
+<img src="rsrc/screenshots/ai_sidebar.png" alt="Merged repo/changes sidebar" width="240"/>
 
 Features
 ---------------
