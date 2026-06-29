@@ -70,6 +70,10 @@ void AiService::chat(const QString &prompt, int maxTokens, Callback callback) {
         QJsonArray{QJsonObject{{"role", "user"}, {"content", prompt}}};
   }
 
+  request.setTransferTimeout(
+      Settings::instance()->value(Setting::Id::AiRequestTimeoutSeconds, 300).toInt() *
+      1000);
+
   QNetworkReply *reply = mNet.post(request, QJsonDocument(body).toJson());
   connect(reply, &QNetworkReply::finished, this,
           [reply, callback, provider = cfg.provider] {
@@ -124,6 +128,10 @@ QNetworkReply *AiService::chatStreaming(const QString &prompt, int maxTokens,
     body["messages"] =
         QJsonArray{QJsonObject{{"role", "user"}, {"content", prompt}}};
   }
+
+  request.setTransferTimeout(
+      Settings::instance()->value(Setting::Id::AiRequestTimeoutSeconds, 300).toInt() *
+      1000);
 
   QNetworkReply *reply = mNet.post(request, QJsonDocument(body).toJson());
   auto buffer = QSharedPointer<QString>::create();

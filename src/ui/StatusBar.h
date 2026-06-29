@@ -27,6 +27,7 @@ private:
   QLabel *mOllamaLabel;
   QLabel *mQueueLabel;
   QLabel *mTokenLabel;
+  QLabel *mCacheLabel;
   QTimer mOllamaTimer;
   QString mOllamaUrl;
 };

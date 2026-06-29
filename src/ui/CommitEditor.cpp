@@ -860,6 +860,7 @@ void CommitEditor::reviewCode() {
     QString cached = kb->findExactReview(diff);
     if (!cached.isEmpty()) {
       kb->incrementCacheHits();
+      TaskDispatcher::instance()->recordCacheHit();
       if (dtw)
         dtw->showReview(cached, diff);
       return;
@@ -878,6 +879,7 @@ void CommitEditor::reviewCode() {
           [this, diff, kb, dtw](KnowledgeBase::MatchResult result) {
         if (result.sufficient) {
           kb->incrementCacheHits();
+          TaskDispatcher::instance()->recordCacheHit();
           mReviewSpinner->stop();
 
           QString composed =

@@ -29,6 +29,10 @@ void EmbeddingClient::embed(const QString &text, SingleCallback callback) {
   body["model"] = mModel;
   body["prompt"] = text;
 
+  request.setTransferTimeout(
+      Settings::instance()->value(Setting::Id::AiRequestTimeoutSeconds, 300).toInt() *
+      1000);
+
   QNetworkReply *reply = mNet.post(request, QJsonDocument(body).toJson());
   connect(reply, &QNetworkReply::finished, this, [reply, callback] {
     reply->deleteLater();
@@ -175,6 +179,11 @@ void EmbeddingClient::embedViaBatchApi(const QStringList &texts, int batchSize,
       for (const QString &t : group.items)
         input.append(t);
       body["input"] = input;
+
+      request.setTransferTimeout(Settings::instance()
+                                     ->value(Setting::Id::AiRequestTimeoutSeconds, 300)
+                                     .toInt() *
+                                 1000);
 
       QNetworkReply *reply =
           state->self->mNet.post(request, QJsonDocument(body).toJson());

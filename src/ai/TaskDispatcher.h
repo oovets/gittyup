@@ -4,10 +4,13 @@
 #include <QObject>
 #include <QQueue>
 #include <QMap>
+#include <QSet>
+#include <QPointer>
 #include <QElapsedTimer>
 #include <functional>
 
 class AiService;
+class QNetworkReply;
 
 class TaskDispatcher : public QObject {
   Q_OBJECT
@@ -48,19 +51,32 @@ public:
   using StreamDoneCallback =
       std::function<void(const QString &text, const QString &error)>;
 
-  void submit(TaskType type, const QString &prompt, ResultCallback callback,
-              Priority priority = Priority::Normal, int maxTokens = 4096);
+  // Opaque handle identifying a submitted task, usable with cancel(). 0 means
+  // the task was rejected (e.g. the queue was full).
+  using TaskHandle = quint64;
 
-  void submitStreaming(TaskType type, const QString &prompt,
-                       StreamCallback onChunk, StreamDoneCallback onDone,
-                       Priority priority = Priority::Normal,
-                       int maxTokens = 4096);
+  TaskHandle submit(TaskType type, const QString &prompt,
+                    ResultCallback callback,
+                    Priority priority = Priority::Normal, int maxTokens = 4096);
+
+  TaskHandle submitStreaming(TaskType type, const QString &prompt,
+                             StreamCallback onChunk, StreamDoneCallback onDone,
+                             Priority priority = Priority::Normal,
+                             int maxTokens = 4096);
+
+  // Abort a queued or in-flight task. The task's callback fires once with a
+  // "Cancelled" result (non-streaming) or the partial text (streaming).
+  void cancel(TaskHandle handle);
 
   void setModelRoute(TaskType type, const ModelRoute &route);
   ModelRoute modelRoute(TaskType type) const;
 
   TaskStats stats() const;
   void resetStats();
+
+  // Record that a request was served from a local cache (knowledge base) so the
+  // live stats reflect avoided API/GPU calls.
+  void recordCacheHit();
 
   int queueDepth() const;
   int activeCount() const;
@@ -71,10 +87,12 @@ signals:
 
 private:
   struct Task {
+    TaskHandle id = 0;
     TaskType type;
     Priority priority;
     QString prompt;
     int maxTokens;
+    int attempt = 0;
     ResultCallback callback;
     StreamCallback streamChunk;
     StreamDoneCallback streamDone;
@@ -92,9 +110,21 @@ private:
   void processQueue();
   void executeTask(Task &task);
 
+  // Insert a task by priority (bounded by mMaxQueue). Returns its handle, or 0
+  // if the queue was full and the task was rejected.
+  TaskHandle enqueue(Task task);
+
+  // Re-queue a transiently-failed task with backoff. Returns true if a retry
+  // was scheduled.
+  bool maybeRetry(const Task &task, QNetworkReply *reply);
+
   QList<Task> mQueue;
   QMap<TaskType, ModelRoute> mRoutes;
   QMap<TaskType, int> mActiveCount;
+  QMap<TaskHandle, QPointer<QNetworkReply>> mActiveReplies;
+  QSet<TaskHandle> mCancelled;
+  TaskHandle mNextHandle = 1;
+  int mMaxQueue = 200;
   TaskStats mStats;
 };
 

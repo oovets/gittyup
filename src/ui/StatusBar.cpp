@@ -48,11 +48,13 @@ StatusBar::StatusBar(QWidget *parent) : QFrame(parent) {
 
   mQueueLabel = makeLabel();
   mTokenLabel = makeLabel();
+  mCacheLabel = makeLabel();
   mAiModelLabel = makeLabel();
   mOllamaLabel = makeLabel();
 
   layout->addWidget(mQueueLabel);
   layout->addWidget(mTokenLabel);
+  layout->addWidget(mCacheLabel);
   layout->addWidget(mAiModelLabel);
   layout->addWidget(mOllamaLabel);
 
@@ -73,6 +75,12 @@ StatusBar::StatusBar(QWidget *parent) : QFrame(parent) {
                                 : QString::number(total);
               mTokenLabel->setText(tok + QStringLiteral(" tok") + kSeparator);
             }
+
+            if (s.cacheHits > 0)
+              mCacheLabel->setText(
+                  QStringLiteral("⚡ %1 cached").arg(s.cacheHits) + kSeparator);
+            else
+              mCacheLabel->clear();
           });
 
   AiService::Config cfg = AiService::instance()->currentConfig();
