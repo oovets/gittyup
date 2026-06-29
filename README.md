@@ -1,32 +1,8 @@
-[![Gittyup Status](https://github.com/Murmele/Gittyup/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/Murmele/Gittyup/actions/workflows/build.yml)
-[![Matrix](https://img.shields.io/matrix/Gittyup:matrix.org?label=Matrix%20Chat)](https://matrix.to/#/#Gittyup:matrix.org)
-[![Donate Liberapay](https://liberapay.com/assets/widgets/donate.svg)](https://liberapay.com/Gittyup/donate)
-
-<a href="https://flathub.org/apps/details/com.github.Murmele.Gittyup">
-<img
-    src="https://flathub.org/assets/badges/flathub-badge-i-en.png"
-    alt="Download Gittyup on Flathub"
-    width="240px"/>
-</a>
-
-Gittyup
-==================================
-
-Gittyup is a graphical Git client designed to help you understand and manage your source code history. The [latest stable release](https://github.com/Murmele/Gittyup/releases/latest)
-is available either as pre-built flatpak for Linux, 32 / 64 binary for Windows, macOS,
-or can be built from source by following the directions [below](https://github.com/Murmele/Gittyup#how-to-build).
-
-The [latest development version](https://github.com/Murmele/Gittyup/releases/tag/development) is available pre-built as well.
-
-Gittyup is a continuation of the [GitAhead](https://github.com/gitahead/gitahead) client.
-
 > **This fork ([oovets/gittyup](https://github.com/oovets/gittyup))** extends Gittyup with an
 > AI-powered development assistant (code review, chat, commit-message generation,
 > codebase-aware context), a built-in **terminal emulator**, a merged repo/changes
 > sidebar, and a live status bar. See [AI & Productivity Features](#ai--productivity-features)
 > below.
-
-![Gittyup](rsrc/screenshots/ai_overview.png)
 
 Table of contents
 =================
@@ -72,8 +48,6 @@ A built-in terminal emulator powered by [libvterm](https://www.leonerd.org.uk/co
 scrollback, working tab-completion, and resize handling. Toggle it from
 **View → Show Terminal** (Ctrl + `` ` ``).
 
-![Integrated terminal](rsrc/screenshots/ai_terminal.png)
-
 **Merged sidebar & status bar**
 
 The sidebar shows each open repository's changed files as expandable children
@@ -81,12 +55,6 @@ under the **OPEN** section (with a change count and per-file status), so changes
 live in the same list as the repos themselves. SSH repositories appear with a
 distinct icon. A live status bar at the bottom shows branch/tracking state, the
 active AI model, Ollama/GPU availability, and the task queue.
-
-<img src="rsrc/screenshots/ai_sidebar.png" alt="Merged repo/changes sidebar" width="240"/>
-
-Features
----------------
-To get an overview of the current features please have a look at the [GitHub Page](https://murmele.github.io/Gittyup/)
 
 How to Get Help
 ---------------
