@@ -5,9 +5,14 @@
 #include "conf/RecentRepositories.h"
 #include "conf/RecentRepository.h"
 #include "conf/Settings.h"
+#include "git/Commit.h"
+#include "git/Diff.h"
+#include "git/Id.h"
+#include "git/Reference.h"
+#include "git/Repository.h"
+#include "git/Tree.h"
 
 #include <QDir>
-#include <QProcess>
 
 static const int kAnalysisIntervalMs = 10 * 60 * 1000; // 10 minutes
 
@@ -45,34 +50,48 @@ RepoAnalyzer::Progress RepoAnalyzer::currentProgress() const {
 // Gather HEAD sha for a repo path
 // ---------------------------------------------------------------------------
 QString RepoAnalyzer::headSha(const QString &repoPath) const {
-  QProcess git;
-  git.setWorkingDirectory(repoPath);
-  git.start("git", {"rev-parse", "HEAD"});
-  if (git.waitForFinished(5000) && git.exitCode() == 0)
-    return QString::fromUtf8(git.readAllStandardOutput()).trimmed();
-  return {};
+  // libgit2 instead of a `git rev-parse` subprocess: in-process and fast, so
+  // the periodic background tick never blocks the UI thread.
+  git::Repository repo = git::Repository::open(repoPath);
+  if (!repo.isValid())
+    return {};
+  git::Reference head = repo.head();
+  git::Commit commit = head.isValid() ? head.target() : git::Commit();
+  return commit.isValid() ? commit.id().toString() : QString();
 }
 
 // ---------------------------------------------------------------------------
-// Get recent diff (last commit or uncommitted changes)
+// Get recent diff (uncommitted changes, else the last commit) via libgit2
 // ---------------------------------------------------------------------------
 QByteArray RepoAnalyzer::recentDiff(const QString &repoPath) const {
-  QProcess git;
-  git.setWorkingDirectory(repoPath);
+  git::Repository repo = git::Repository::open(repoPath);
+  if (!repo.isValid())
+    return {};
 
-  // First try uncommitted changes
-  git.start("git", {"diff", "HEAD"});
-  if (git.waitForFinished(10000) && git.exitCode() == 0) {
-    QByteArray diff = git.readAllStandardOutput();
-    if (!diff.trimmed().isEmpty())
-      return diff.left(32000);
+  git::Reference head = repo.head();
+  git::Commit headCommit = head.isValid() ? head.target() : git::Commit();
+
+  // Uncommitted changes (staged + unstaged) relative to HEAD.
+  QByteArray out;
+  if (headCommit.isValid()) {
+    git::Diff staged = repo.diffTreeToIndex(headCommit.tree());
+    if (staged.isValid())
+      out += staged.print();
   }
+  git::Diff unstaged = repo.diffIndexToWorkdir();
+  if (unstaged.isValid())
+    out += unstaged.print();
+  if (!out.trimmed().isEmpty())
+    return out.left(32000);
 
-  // Fall back to last commit diff
-  git.start("git", {"diff", "HEAD~1", "HEAD"});
-  if (git.waitForFinished(10000) && git.exitCode() == 0) {
-    QByteArray diff = git.readAllStandardOutput();
-    return diff.left(32000);
+  // Fall back to the last commit's diff (HEAD~1 -> HEAD).
+  if (headCommit.isValid()) {
+    QList<git::Commit> parents = headCommit.parents();
+    if (!parents.isEmpty()) {
+      git::Diff d = headCommit.diff(parents.first());
+      if (d.isValid())
+        return d.print().left(32000);
+    }
   }
 
   return {};

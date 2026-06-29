@@ -1,9 +1,14 @@
 #include "ChatPanel.h"
 #include "ai/AiService.h"
 #include "conf/Settings.h"
+#include "git/Commit.h"
 #include "git/Diff.h"
+#include "git/Id.h"
 #include "git/Reference.h"
+#include "git/RevWalk.h"
 #include "git/Signature.h"
+#include "git/Tree.h"
+#include <git2/revwalk.h>
 #include <QComboBox>
 #include <QFontDatabase>
 #include <QHBoxLayout>
@@ -16,7 +21,6 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
-#include <QProcess>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollBar>
@@ -140,25 +144,39 @@ QString ChatPanel::gatherRepoContext() const {
 
   ctx += QStringLiteral("Repository: ") + mRepo.workdir().path() + "\n";
 
-  // Recent commit messages for context
-  QProcess git;
-  git.setWorkingDirectory(mRepo.workdir().path());
-  git.start("git",
-            {"log", "--oneline", "-10", "--no-decorate"});
-  if (git.waitForFinished(3000) && git.exitCode() == 0) {
-    ctx += QStringLiteral("\nRecent commits:\n");
-    ctx += QString::fromUtf8(git.readAllStandardOutput());
+  git::Commit headCommit = head.isValid() ? head.target() : git::Commit();
+
+  // Recent commits via libgit2 (no `git log` subprocess blocking the UI).
+  if (headCommit.isValid()) {
+    git::RevWalk walk = headCommit.walker(GIT_SORT_TIME);
+    QStringList commits;
+    for (int i = 0; i < 10; ++i) {
+      git::Commit c = walk.next();
+      if (!c.isValid())
+        break;
+      commits += c.id().toString().left(8) + " " + c.summary();
+    }
+    if (!commits.isEmpty())
+      ctx += QStringLiteral("\nRecent commits:\n") + commits.join('\n') + "\n";
   }
 
-  // Current status summary
-  git.start("git", {"status", "--short"});
-  if (git.waitForFinished(3000) && git.exitCode() == 0) {
-    QString status = QString::fromUtf8(git.readAllStandardOutput());
-    if (!status.isEmpty()) {
-      ctx += QStringLiteral("\nWorking tree status:\n");
-      ctx += status.left(2000);
+  // Changed files (staged + unstaged) relative to HEAD, via libgit2 diffs.
+  QStringList changed;
+  auto collect = [&changed](const git::Diff &d) {
+    if (!d.isValid())
+      return;
+    for (int i = 0; i < d.count(); ++i) {
+      const QString n = d.name(i);
+      if (!n.isEmpty() && !changed.contains(n))
+        changed += n;
     }
-  }
+  };
+  if (headCommit.isValid())
+    collect(mRepo.diffTreeToIndex(headCommit.tree()));
+  collect(mRepo.diffIndexToWorkdir());
+  if (!changed.isEmpty())
+    ctx += QStringLiteral("\nChanged files:\n") +
+           changed.join('\n').left(2000) + "\n";
 
   return ctx;
 }
@@ -328,6 +346,9 @@ void ChatPanel::sendMessage() {
   // Start the AI response block in the chat view
   mChatView->append("<b>AI:</b> ");
 
+  req.setTransferTimeout(
+      Settings::instance()->value(Setting::Id::AiRequestTimeoutSeconds, 300).toInt() *
+      1000);
   mActiveReply = mNet->post(req, QJsonDocument(body).toJson());
 
   connect(mActiveReply, &QNetworkReply::readyRead, this,
