@@ -41,6 +41,8 @@ private:
   QString buildSystemPrompt() const;
   QString gatherRepoContext() const;
   void appendMessage(const QString &role, const QString &text);
+  void renderFormattedResponse();
+  static QString markdownToHtml(const QString &md);
   void scrollToBottom();
 
   git::Repository mRepo;

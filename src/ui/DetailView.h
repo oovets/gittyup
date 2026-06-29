@@ -42,6 +42,7 @@ public:
 };
 
 class CommitEditor;
+class DoubleTreeWidget;
 
 class DetailView : public QWidget {
   Q_OBJECT
@@ -74,6 +75,8 @@ public:
                const QString &pathspec = QString());
 
   void cancelBackgroundTasks();
+
+  DoubleTreeWidget *doubleTreeWidget() const;
 
   void find();
   void findNext();

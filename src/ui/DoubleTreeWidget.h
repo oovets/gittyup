@@ -14,6 +14,7 @@
 #include "DetailView.h"
 #include "git/Index.h"
 #include <QModelIndexList>
+#include <QSet>
 #include "conf/Settings.h"
 
 class QTreeView;
@@ -22,6 +23,8 @@ class BlameEditor;
 class StatePushButton;
 class DiffView;
 class QLabel;
+class QCheckBox;
+class QTextBrowser;
 
 // button in treeview:
 // https://stackoverflow.com/questions/40716138/how-to-add-a-button-to-a-qtreeview-row
@@ -48,6 +51,11 @@ public:
   void findNext() override;
   void findPrevious() override;
 
+  void showReview(const QString &text, const QByteArray &diff = {});
+  void startReviewSpinner();
+  void stopReviewSpinner();
+  void applyFixBlocks(const QString &aiResponse);
+
   uint32_t setDiffCounter() { return mSetDiffCounter; }
 
 private slots:
@@ -61,6 +69,7 @@ private:
   enum View {
     Blame,
     Diff,
+    Review,
   };
 
   void treeModelStateChanged(const QModelIndex &index, int checkState);
@@ -104,8 +113,16 @@ private:
    */
   DiffView *mDiffView{nullptr};
 
+  QTextBrowser *mReviewPanel{nullptr};
+  QPushButton *mFixBtn{nullptr};
+  QCheckBox *mHideFixedCb{nullptr};
+  QWidget *mReviewContainer{nullptr};
+  QString mLastReviewText;
+  QByteArray mLastReviewDiff;
+  QSet<QString> mFixedIssueKeys;
+
   /*!
-   * Shows BlameEditor or DiffView
+   * Shows BlameEditor, DiffView, or ReviewPanel
    */
   QStackedWidget *mFileView{nullptr};
   bool mIgnoreSelectionChange{false};

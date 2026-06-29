@@ -16,6 +16,7 @@
 #include "TreeWidget.h"
 #include "CommitEditor.h"
 #include "ai/AiService.h"
+#include "ai/TaskDispatcher.h"
 #include "conf/Settings.h"
 #include "git/Commit.h"
 #include "git/Config.h"
@@ -247,10 +248,17 @@ public:
     connect(mSummarize, &QToolButton::clicked, this,
             &CommitDetail::summarizeCommit);
 
+    mReview = new QToolButton(this);
+    mReview->setText(tr("Review"));
+    mReview->setToolTip(tr("AI code review of this commit"));
+    connect(mReview, &QToolButton::clicked, this,
+            &CommitDetail::reviewCommit);
+
     QHBoxLayout *line3 = new QHBoxLayout;
     line3->addWidget(mHash);
     line3->addWidget(copy);
     line3->addWidget(mSummarize);
+    line3->addWidget(mReview);
     line3->addWidget(mParents);
     line3->addStretch();
     line3->addWidget(mRefs);
@@ -343,6 +351,7 @@ public:
     mSeparator->setVisible(false);
     mMessage->setVisible(false);
     mSummarize->setVisible(false);
+    mReview->setVisible(false);
 
     // Reset references.
     setReferences(commits);
@@ -406,6 +415,7 @@ public:
     mSeparator->setVisible(true);
     mMessage->setVisible(true);
     mSummarize->setVisible(true);
+    mReview->setVisible(true);
 
     // Populate details.
     git::Commit commit = commits.first();
@@ -519,16 +529,59 @@ private slots:
     mSummary->setText(tr("Generating summary…"));
     mSummary->setVisible(true);
 
-    AiService::instance()->chat(prompt, 1024,
-        [this](const QString &reply, const QString &error) {
+    TaskDispatcher::instance()->submit(
+        TaskDispatcher::TaskType::Chat, prompt,
+        [this](const TaskDispatcher::TaskResult &r) {
           mSummarize->setEnabled(true);
           mSummarize->setText(tr("Summarize"));
-          if (!error.isEmpty()) {
-            mSummary->setText(tr("Error: %1").arg(error));
-          } else {
-            mSummary->setText(reply);
-          }
-        });
+          if (!r.error.isEmpty())
+            mSummary->setText(tr("Error: %1").arg(r.error));
+          else
+            mSummary->setText(r.text);
+        },
+        TaskDispatcher::Priority::Normal, 1024);
+  }
+
+  void reviewCommit() {
+    if (!mCurrentCommit.isValid())
+      return;
+
+    git::Diff d = mCurrentCommit.diff();
+    if (!d.isValid())
+      return;
+
+    QByteArray diffBytes = d.print();
+    if (diffBytes.trimmed().isEmpty())
+      return;
+
+    if (diffBytes.size() > 32000)
+      diffBytes = diffBytes.left(32000);
+
+    RepoView *view = RepoView::parentView(this);
+    DoubleTreeWidget *dtw = view ? view->doubleTreeWidget() : nullptr;
+    if (!dtw)
+      return;
+
+    dtw->startReviewSpinner();
+    mReview->setEnabled(false);
+    mReview->setText(tr("Reviewing…"));
+
+    QString sha = mCurrentCommit.shortId();
+    QString commitMsg = mCurrentCommit.message();
+
+    QString prompt = AiService::reviewPrompt(diffBytes, sha, commitMsg);
+
+    TaskDispatcher::instance()->submit(
+        TaskDispatcher::TaskType::Review, prompt,
+        [this, dtw, diffBytes](const TaskDispatcher::TaskResult &r) {
+          mReview->setEnabled(true);
+          mReview->setText(tr("Review"));
+          if (!r.error.isEmpty())
+            dtw->showReview(tr("**Review failed:** %1").arg(r.error), diffBytes);
+          else
+            dtw->showReview(r.text, diffBytes);
+        },
+        TaskDispatcher::Priority::Normal, AiService::ReviewMaxTokens);
   }
 
 private:
@@ -540,6 +593,7 @@ private:
   QTextEdit *mMessage;
   QLabel *mSummary;
   QToolButton *mSummarize;
+  QToolButton *mReview;
   AuthorCommitterDate *mAuthorCommitterDate;
 
   QString mId;
@@ -592,6 +646,10 @@ DetailView::DetailView(const git::Repository &repo, QWidget *parent)
 }
 
 DetailView::~DetailView() {}
+
+DoubleTreeWidget *DetailView::doubleTreeWidget() const {
+  return static_cast<DoubleTreeWidget *>(mContent->widget(DiffIndex));
+}
 
 void DetailView::commit(bool force) {
   Q_ASSERT(isCommitEnabled());

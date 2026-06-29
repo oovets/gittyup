@@ -18,6 +18,7 @@
 #include <QNetworkRequest>
 #include <QProcess>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QScrollBar>
 #include <QTextEdit>
 #include <QVBoxLayout>
@@ -49,6 +50,15 @@ ChatPanel::ChatPanel(const git::Repository &repo, QWidget *parent)
   mChatView->setPlaceholderText(
       tr("Chat about this repository. Ask questions about code, diffs, "
          "branches, or anything else."));
+
+  QString fg = palette().color(QPalette::Text).name();
+  QString bg = palette().color(QPalette::Base).name();
+  QString bgAlt = palette().color(QPalette::AlternateBase).name();
+  mChatView->document()->setDefaultStyleSheet(QStringLiteral(
+      "body { color: %1; }"
+      "pre { background: %2; padding: 4px 6px; margin: 4px 0; }"
+      "code { background: %2; padding: 1px 3px; }")
+      .arg(fg, bgAlt));
 
   mInput = new ChatInput(this);
   mInput->setFont(mono);
@@ -153,13 +163,85 @@ QString ChatPanel::gatherRepoContext() const {
   return ctx;
 }
 
+QString ChatPanel::markdownToHtml(const QString &md) {
+  QString result;
+  QStringList lines = md.split('\n');
+  bool inCodeBlock = false;
+
+  for (const QString &line : lines) {
+    if (line.startsWith("```")) {
+      if (!inCodeBlock) {
+        inCodeBlock = true;
+        result += "<pre>";
+      } else {
+        inCodeBlock = false;
+        result += "</pre>";
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      result += line.toHtmlEscaped() + "\n";
+      continue;
+    }
+
+    QString processed = line;
+
+    if (processed.startsWith("### "))
+      { result += "<b>" + processed.mid(4).toHtmlEscaped() + "</b><br>"; continue; }
+    if (processed.startsWith("## "))
+      { result += "<b>" + processed.mid(3).toHtmlEscaped() + "</b><br>"; continue; }
+    if (processed.startsWith("# "))
+      { result += "<b>" + processed.mid(2).toHtmlEscaped() + "</b><br>"; continue; }
+
+    processed = processed.toHtmlEscaped();
+
+    static QRegularExpression codeRe("`([^`]+)`");
+    processed.replace(codeRe, "<code>\\1</code>");
+    static QRegularExpression boldRe("\\*\\*([^*]+)\\*\\*");
+    processed.replace(boldRe, "<b>\\1</b>");
+    static QRegularExpression italicRe("\\*([^*]+)\\*");
+    processed.replace(italicRe, "<i>\\1</i>");
+
+    if (processed.startsWith("- ") || processed.startsWith("* "))
+      { result += " &bull; " + processed.mid(2) + "<br>"; continue; }
+
+    if (processed.trimmed().isEmpty())
+      result += "<br>";
+    else
+      result += processed + "<br>";
+  }
+
+  if (inCodeBlock)
+    result += "</pre>";
+
+  return result;
+}
+
 void ChatPanel::appendMessage(const QString &role, const QString &text) {
-  QString label = (role == "user") ? QStringLiteral("<b>You:</b> ")
-                                   : QStringLiteral("<b>AI:</b> ");
-  QString html = text.toHtmlEscaped().replace("\n", "<br>");
-  mChatView->append(label + html);
+  if (role == "user") {
+    QString html = text.toHtmlEscaped().replace("\n", "<br>");
+    mChatView->append("<b style='color:#64b5f6;'>You:</b> " + html);
+  } else {
+    mChatView->append("<b style='color:#81c784;'>AI:</b>");
+    mChatView->append(markdownToHtml(text));
+  }
   mChatView->append("");
   scrollToBottom();
+}
+
+void ChatPanel::renderFormattedResponse() {
+  QTextDocument *doc = mChatView->document();
+  QTextCursor findCursor =
+      doc->find("AI:", QTextCursor(), QTextDocument::FindBackward);
+  if (findCursor.isNull())
+    return;
+
+  findCursor.movePosition(QTextCursor::StartOfBlock);
+  findCursor.movePosition(QTextCursor::End, QTextCursor::KeepAnchor);
+  findCursor.removeSelectedText();
+  findCursor.insertHtml("<b style='color:#81c784;'>AI:</b><br>" +
+                         markdownToHtml(mStreamBuffer));
 }
 
 void ChatPanel::scrollToBottom() {
@@ -327,8 +409,10 @@ void ChatPanel::onStreamFinished() {
             .arg(errText.toHtmlEscaped().left(500)));
     mStatusLabel->setText(tr("Request failed"));
   } else {
-    if (!mStreamBuffer.isEmpty())
+    if (!mStreamBuffer.isEmpty()) {
       mHistory.append({"assistant", mStreamBuffer});
+      renderFormattedResponse();
+    }
     mChatView->append("");
     mStatusLabel->setText(tr("Ready"));
   }

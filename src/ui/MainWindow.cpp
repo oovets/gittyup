@@ -14,6 +14,7 @@
 #include "RepoView.h"
 #include "SearchField.h"
 #include "SideBar.h"
+#include "StatusBar.h"
 #include "TabWidget.h"
 #include "ToolBar.h"
 #include "conf/RecentRepositories.h"
@@ -31,6 +32,7 @@
 #include <QMimeData>
 #include <QSettings>
 #include <QTimeLine>
+#include <QVBoxLayout>
 #include <QToolButton>
 #include "util/Debug.h"
 
@@ -123,12 +125,12 @@ MainWindow::MainWindow(const git::Repository &repo, QWidget *parent,
           });
 
   // Create splitter.
-  QSplitter *splitter = new QSplitter(this);
-  splitter->setHandleWidth(0);
-  connect(splitter, &QSplitter::splitterMoved, [this] {
-    QSplitter *splitter = static_cast<QSplitter *>(centralWidget());
-    mIsSideBarVisible = (splitter->sizes().first() > 0);
+  mSplitter = new QSplitter(this);
+  mSplitter->setHandleWidth(0);
+  connect(mSplitter, &QSplitter::splitterMoved, [this] {
+    mIsSideBarVisible = (mSplitter->sizes().first() > 0);
   });
+  QSplitter *splitter = mSplitter;
 
   // Create tab container.
   TabWidget *tabs = new TabWidget(splitter);
@@ -147,7 +149,16 @@ MainWindow::MainWindow(const git::Repository &repo, QWidget *parent,
   splitter->setCollapsible(1, false);
   splitter->setStretchFactor(1, 1);
 
-  setCentralWidget(splitter);
+  mStatusBar = new StatusBar(this);
+
+  QWidget *central = new QWidget(this);
+  QVBoxLayout *centralLayout = new QVBoxLayout(central);
+  centralLayout->setContentsMargins(0, 0, 0, 0);
+  centralLayout->setSpacing(0);
+  centralLayout->addWidget(splitter, 1);
+  centralLayout->addWidget(mStatusBar);
+
+  setCentralWidget(central);
 
   if (repo)
     addTab(repo);
@@ -186,9 +197,8 @@ void MainWindow::setSideBarVisible(bool visible) {
   QSettings().setValue(kSidebarKey, visible);
 
   // Animate sidebar sliding in or out.
-  QSplitter *splitter = static_cast<QSplitter *>(centralWidget());
-  QWidget *sidebar = splitter->widget(0);
-  int pos = visible ? sidebar->sizeHint().width() : splitter->sizes().first();
+  QWidget *sidebar = mSplitter->widget(0);
+  int pos = visible ? sidebar->sizeHint().width() : mSplitter->sizes().first();
 
   QTimeLine *timeline = new QTimeLine(250, this);
   timeline->setDirection(visible ? QTimeLine::Forward : QTimeLine::Backward);
@@ -196,8 +206,7 @@ void MainWindow::setSideBarVisible(bool visible) {
   timeline->setUpdateInterval(20);
 
   connect(timeline, &QTimeLine::valueChanged, [this, pos](qreal value) {
-    QSplitter *splitter = static_cast<QSplitter *>(centralWidget());
-    splitter->setSizes({static_cast<int>(pos * value), 1});
+    mSplitter->setSizes({static_cast<int>(pos * value), 1});
   });
 
   connect(timeline, &QTimeLine::finished,
@@ -207,8 +216,7 @@ void MainWindow::setSideBarVisible(bool visible) {
 }
 
 TabWidget *MainWindow::tabWidget() const {
-  QSplitter *splitter = static_cast<QSplitter *>(centralWidget());
-  return static_cast<TabWidget *>(splitter->widget(1));
+  return static_cast<TabWidget *>(mSplitter->widget(1));
 }
 
 RepoView *MainWindow::addTab(const QString &path) {
@@ -518,6 +526,7 @@ void MainWindow::updateInterface() {
 
   updateWindowTitle(ahead, behind);
   mToolBar->updateButtons(ahead, behind);
+  mStatusBar->updateRepo(currentView());
 }
 
 void MainWindow::updateWindowTitle(int ahead, int behind) {

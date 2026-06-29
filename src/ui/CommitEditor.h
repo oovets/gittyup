@@ -49,6 +49,7 @@ public slots:
 private slots:
   void generateAiMessage();
   void reviewCode();
+  void reviewRepo();
 
 private:
   void performFullReview(const QByteArray &diff);
@@ -69,7 +70,6 @@ private:
   QPushButton *mMergeAbort;
   QPushButton   *mAiGenerate;
   QPushButton   *mAiReview;
-  QPushButton   *mAiHistory;
   QPushButton   *mAiChat;
   SpinnerButton *mGenerateSpinner = nullptr;
   SpinnerButton *mReviewSpinner   = nullptr;

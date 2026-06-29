@@ -30,7 +30,10 @@
 
 class ChatPanel;
 class CommitList;
+class TerminalView;
+class QTabWidget;
 class DetailView;
+class DoubleTreeWidget;
 class EditorWindow;
 class History;
 class Index;
@@ -105,6 +108,8 @@ public:
   ViewMode viewMode() const;
   void setViewMode(ViewMode mode);
 
+  DoubleTreeWidget *doubleTreeWidget() const;
+
   // workdir
   bool isWorkingDirectoryDirty() const;
 
@@ -145,6 +150,11 @@ public:
   bool isChatVisible() const;
   void setChatVisible(bool visible);
   ChatPanel *chatPanel() const;
+
+  // bottom panel (tabbed: Log, Chat, Terminal)
+  bool isBottomPanelVisible() const;
+  void setBottomPanelVisible(bool visible);
+  void showBottomTab(int index);
 
   /*!
    * \brief addLogEntry
@@ -431,6 +441,9 @@ private:
   bool mIsLogVisible = false;
 
   ChatPanel *mChatPanel;
+  TerminalView *mTerminal;
+  QTabWidget *mBottomTabs;
+  bool mBottomPanelVisible = false;
   bool mIsChatVisible = false;
 
   QTimer mFetchTimer;

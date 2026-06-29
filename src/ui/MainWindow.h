@@ -12,8 +12,10 @@
 
 #include "git/Repository.h"
 #include <QMainWindow>
+#include <QSplitter>
 
 class RepoView;
+class StatusBar;
 class TabWidget;
 class ToolBar;
 class MenuBar;
@@ -75,6 +77,8 @@ private:
 
   ToolBar *mToolBar;
   MenuBar *mMenuBar;
+  StatusBar *mStatusBar;
+  QSplitter *mSplitter;
 
   bool mFullPath = false;
   bool mIsSideBarVisible = true;

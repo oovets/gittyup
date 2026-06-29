@@ -32,9 +32,11 @@
 #include <QtConcurrent>
 #include <QMenu>
 #include <QMessageBox>
+#include <QProcess>
 #include <QPushButton>
 #include <QSettings>
 #include <QStyledItemDelegate>
+#include <QTimer>
 #include <QTreeView>
 #include <QVBoxLayout>
 
@@ -59,7 +61,31 @@ enum Role {
   RecentRole,
   AccountRole,
   AccountKindRole,
-  RepositoryRole
+  RepositoryRole,
+  ChangeFileRole
+};
+
+bool isChangeFileIndex(quintptr id) { return (id & 0x1) && id != 0; }
+int changeFileRepoIndex(quintptr id) { return static_cast<int>(id >> 16); }
+
+struct ChangeEntry {
+  QString file;
+  QString status;
+  int repoIndex;
+  bool operator==(const ChangeEntry &o) const {
+    return file == o.file && status == o.status && repoIndex == o.repoIndex;
+  }
+};
+
+struct RepoChanges {
+  QString repoName;
+  QString repoPath;
+  int repoIndex = -1;
+  QList<ChangeEntry> files;
+  bool operator==(const RepoChanges &o) const {
+    return repoPath == o.repoPath && repoIndex == o.repoIndex &&
+           files == o.files;
+  }
 };
 
 class ProgressDelegate : public QStyledItemDelegate {
@@ -164,6 +190,11 @@ public:
                   index(repoIndex, 0, index(accountIndex, 0, index(Remote, 0)));
               emit dataChanged(idx, idx, {Qt::DisplayRole});
             });
+
+    mChangesTimer.setInterval(3000);
+    connect(&mChangesTimer, &QTimer::timeout, this, &RepoModel::refreshChanges);
+    mChangesTimer.start();
+    refreshChanges();
   }
 
   QModelIndex index(int row, int column,
@@ -184,6 +215,13 @@ public:
 
       // progress
       return createIndex(row, column, account->progress());
+    }
+
+    // Children of a RepoView = change files for that repo
+    if (RepoView *rv = qobject_cast<RepoView *>(ptr)) {
+      int tabIdx = mTabs->indexOf(rv);
+      quintptr tag = (static_cast<quintptr>(tabIdx) << 16) | 0x1;
+      return createIndex(row, column, tag);
     }
 
     Accounts *accounts = Accounts::instance();
@@ -212,6 +250,15 @@ public:
     QObject *ptr = static_cast<QObject *>(index.internalPointer());
     if (!ptr)
       return QModelIndex();
+
+    // Change file tagged index
+    quintptr id = index.internalId();
+    if (isChangeFileIndex(id)) {
+      int repoIdx = changeFileRepoIndex(id);
+      if (repoIdx >= 0 && repoIdx < mTabs->count())
+        return createIndex(repoIdx, 0, mTabs->widget(repoIdx));
+      return createIndex(Repo, 0);
+    }
 
     if (qobject_cast<RepoView *>(ptr) || qobject_cast<TabWidget *>(ptr))
       return createIndex(Repo, 0);
@@ -242,7 +289,19 @@ public:
     if (!parent.isValid())
       return 3;
 
+    // Tagged change file indices have no children
+    quintptr id = parent.internalId();
+    if (isChangeFileIndex(id))
+      return 0;
+
     QObject *ptr = static_cast<QObject *>(parent.internalPointer());
+
+    // RepoView children = change files for that repo
+    if (RepoView *rv = qobject_cast<RepoView *>(ptr)) {
+      int tabIdx = mTabs->indexOf(rv);
+      return changesForRepo(tabIdx);
+    }
+
     if (Account *account = qobject_cast<Account *>(ptr)) {
       int count = account->repositoryCount();
       if (count > 0)
@@ -281,6 +340,40 @@ public:
 
   QVariant data(const QModelIndex &index,
                 int role = Qt::DisplayRole) const override {
+    // Change file under a repo
+    quintptr id = index.internalId();
+    if (isChangeFileIndex(id)) {
+      int repoIdx = changeFileRepoIndex(id);
+      const ChangeEntry *ce = changeEntryForRepo(repoIdx, index.row());
+      if (!ce) return QVariant();
+      switch (role) {
+        case Qt::DisplayRole: {
+          QString s;
+          if (ce->status == "M") s = QStringLiteral("✎");
+          else if (ce->status == "A" || ce->status == "??") s = "+";
+          else if (ce->status == "D") s = QStringLiteral("−");
+          else s = ce->status;
+          return QStringLiteral("%1 %2").arg(s, ce->file);
+        }
+        case Qt::ForegroundRole:
+          if (ce->status == "M") return QColor("#e2c08d");
+          if (ce->status == "A" || ce->status == "??") return QColor("#81c784");
+          if (ce->status == "D") return QColor("#e57373");
+          return QPalette().brush(QPalette::Text);
+        case TabRole:
+          if (repoIdx >= 0 && repoIdx < mTabs->count())
+            return QVariant::fromValue(
+                static_cast<RepoView *>(mTabs->widget(repoIdx)));
+          return QVariant();
+        case ChangeFileRole:
+          return ce->file;
+        case Qt::SizeHintRole:
+          return QSize(0, QFontMetrics(QFont()).lineSpacing() + 2);
+        default:
+          return QVariant();
+      }
+    }
+
     QObject *ptr = static_cast<QObject *>(index.internalPointer());
     if (Repository *repo = qobject_cast<Repository *>(ptr)) {
       switch (role) {
@@ -359,11 +452,17 @@ public:
         switch (parent.row()) {
           case Repo:
             if (mTabs->count()) {
-              if (!mShowFullPath)
-                return mTabs->tabText(row);
-
-              RepoView *view = static_cast<RepoView *>(mTabs->widget(row));
-              return view->repo().dir(false).path();
+              QString name;
+              if (!mShowFullPath) {
+                name = mTabs->tabText(row);
+              } else {
+                RepoView *view = static_cast<RepoView *>(mTabs->widget(row));
+                name = view->repo().dir(false).path();
+              }
+              int nc = changesForRepo(row);
+              if (nc > 0)
+                return QStringLiteral("%1 (%2)").arg(name).arg(nc);
+              return name;
             }
 
             return tr("none");
@@ -561,6 +660,61 @@ public:
     endResetModel();
   }
 
+  void refreshChanges() {
+    QList<RepoChanges> newChanges;
+    for (int i = 0; i < mTabs->count(); ++i) {
+      RepoView *view = static_cast<RepoView *>(mTabs->widget(i));
+      if (!view) continue;
+      git::Repository repo = view->repo();
+      if (!repo.isValid()) continue;
+
+      RepoChanges rc;
+      rc.repoName = mTabs->tabText(i);
+      rc.repoPath = repo.workdir().path();
+      rc.repoIndex = i;
+
+      QProcess git;
+      git.setWorkingDirectory(rc.repoPath);
+      git.start("git", {"status", "--porcelain", "-uall"});
+      if (!git.waitForFinished(2000) || git.exitCode() != 0)
+        continue;
+
+      QString output = QString::fromUtf8(git.readAllStandardOutput());
+      for (const QString &line : output.split('\n', Qt::SkipEmptyParts)) {
+        if (line.size() < 4) continue;
+        ChangeEntry ce;
+        ce.status = line.left(2).trimmed();
+        ce.file = line.mid(3);
+        ce.repoIndex = i;
+        rc.files.append(ce);
+      }
+      if (!rc.files.isEmpty())
+        newChanges.append(rc);
+    }
+
+    if (newChanges != mChanges) {
+      beginResetModel();
+      mChanges = newChanges;
+      endResetModel();
+    }
+  }
+
+  int changesForRepo(int tabIdx) const {
+    for (const auto &rc : mChanges) {
+      if (rc.repoIndex == tabIdx)
+        return rc.files.size();
+    }
+    return 0;
+  }
+
+  const ChangeEntry *changeEntryForRepo(int tabIdx, int fileRow) const {
+    for (const auto &rc : mChanges) {
+      if (rc.repoIndex == tabIdx && fileRow < rc.files.size())
+        return &rc.files[fileRow];
+    }
+    return nullptr;
+  }
+
 private:
   TabWidget *mTabs;
   bool mShowFullPath = false;
@@ -570,6 +724,9 @@ private:
   QIcon mErrorIcon;
   QIcon mSshIcon;
   QString mSshBase;
+
+  QList<RepoChanges> mChanges;
+  QTimer mChangesTimer;
 };
 
 // Does this index correspond to one of the open repositories?
@@ -577,6 +734,10 @@ bool isRepoIndex(const QModelIndex &index) {
   QModelIndex parent = index.parent();
   return (parent.isValid() && !parent.parent().isValid() &&
           parent.row() == RepoModel::Repo);
+}
+
+bool isChangesIndex(const QModelIndex &index) {
+  return isChangeFileIndex(index.internalId());
 }
 
 bool isRemoteIndex(const QModelIndex &index) {
@@ -604,6 +765,14 @@ void restoreExpansionState(QTreeView *view) {
   QAbstractItemModel *model = view->model();
   for (int i = 0; i < model->rowCount(); ++i)
     view->expand(model->index(i, 0));
+
+  // Auto-expand repos with changes
+  QModelIndex repoRoot = model->index(RepoModel::Repo, 0);
+  for (int i = 0; i < model->rowCount(repoRoot); ++i) {
+    QModelIndex repoIdx = model->index(i, 0, repoRoot);
+    if (model->rowCount(repoIdx) > 0)
+      view->expand(repoIdx);
+  }
 
   QSettings settings;
   settings.beginGroup(kRemoteExpandedGroup);
@@ -657,8 +826,18 @@ SideBar::SideBar(TabWidget *tabs, MainWindow *mainWindow, QWidget *parent)
   });
 
   connect(view, &QTreeView::clicked, [tabs](const QModelIndex &index) {
-    if (isRepoIndex(index))
+    if (isRepoIndex(index)) {
       tabs->setCurrentIndex(index.row());
+      return;
+    }
+    if (isChangesIndex(index)) {
+      RepoView *rv = index.data(TabRole).value<RepoView *>();
+      if (rv) {
+        int tabIdx = tabs->indexOf(rv);
+        if (tabIdx >= 0)
+          tabs->setCurrentIndex(tabIdx);
+      }
+    }
   });
 
   connect(

@@ -7,7 +7,8 @@ add_library(
   FixApplicator.cpp
   FindingParser.cpp
   KnowledgeBase.cpp
-  RepoAnalyzer.cpp)
+  RepoAnalyzer.cpp
+  TaskDispatcher.cpp)
 
 target_link_libraries(ai conf Qt6::Core Qt6::Network Qt6::Sql)
 

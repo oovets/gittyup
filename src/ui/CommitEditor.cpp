@@ -1,4 +1,5 @@
 #include "CommitEditor.h"
+#include "DoubleTreeWidget.h"
 #include "TemplateButton.h"
 #include "app/Application.h"
 #include "conf/Settings.h"
@@ -23,12 +24,15 @@
 #include <QActionGroup>
 #include <QSettings>
 #include <QDialog>
+#include <QFile>
 #include <QFontDatabase>
-#include "CodeReviewDialog.h"
+#include <QProcess>
+#include "ai/AiReviewStore.h"
 #include "ai/AiService.h"
 #include "ai/CodebaseIndex.h"
 #include "ai/FindingParser.h"
 #include "ai/KnowledgeBase.h"
+#include "ai/TaskDispatcher.h"
 
 namespace {
 const QString kDictKey = "commit.spellcheck.dict";
@@ -502,18 +506,39 @@ CommitEditor::CommitEditor(const git::Repository &repo, QWidget *parent)
   connect(mAiGenerate, &QPushButton::clicked, this,
           &CommitEditor::generateAiMessage);
 
-  mAiReview = new QPushButton(tr("Review Code"), this);
+  mAiReview = new QPushButton(tr("Review ▾"), this);
   mAiReview->setObjectName("AiReview");
-  mAiReview->setToolTip(tr("Review diff for bugs and security issues using AI"));
-  connect(mAiReview, &QPushButton::clicked, this, &CommitEditor::reviewCode);
+  mAiReview->setToolTip(tr("AI code review options"));
 
-  mAiHistory = new QPushButton(tr("Review History"), this);
-  mAiHistory->setObjectName("AiHistory");
-  mAiHistory->setToolTip(tr("Browse past code reviews for this repository"));
-  connect(mAiHistory, &QPushButton::clicked, this, [this] {
-    CodeReviewDialog *dlg = new CodeReviewDialog(mRepo, this);
-    dlg->open();
+  QMenu *reviewMenu = new QMenu(this);
+  reviewMenu->addAction(tr("Review Code"), this, &CommitEditor::reviewCode);
+  reviewMenu->addAction(tr("Review Repo"), this, &CommitEditor::reviewRepo);
+  reviewMenu->addAction(tr("Review History"), this, [this] {
+    RepoView *view = RepoView::parentView(this);
+    DoubleTreeWidget *dtw = view ? view->doubleTreeWidget() : nullptr;
+    if (!dtw) return;
+
+    QList<AiReviewStore::Entry> entries =
+        AiReviewStore::instance()->listForRepo(mRepo.workdir().path());
+
+    if (entries.isEmpty()) {
+      dtw->showReview(tr("No review history found for this repository."));
+      return;
+    }
+
+    QString html;
+    int limit = qMin(entries.size(), 20);
+    for (int i = 0; i < limit; ++i) {
+      const auto &e = entries[i];
+      html += QStringLiteral("## Review %1 — %2\n**%3 / %4** | commit %5\n\n%6\n\n---\n\n")
+                  .arg(i + 1)
+                  .arg(e.timestamp.toString("yyyy-MM-dd hh:mm"))
+                  .arg(e.provider, e.model,
+                       e.headSha.left(8), e.reviewText);
+    }
+    dtw->showReview(html);
   });
+  mAiReview->setMenu(reviewMenu);
 
   mGenerateSpinner = new SpinnerButton(mAiGenerate, this);
   mReviewSpinner   = new SpinnerButton(mAiReview,   this);
@@ -563,7 +588,6 @@ CommitEditor::CommitEditor(const git::Repository &repo, QWidget *parent)
   buttonLayout->addWidget(mUnstage);
   buttonLayout->addWidget(mAiGenerate);
   buttonLayout->addWidget(mAiReview);
-  buttonLayout->addWidget(mAiHistory);
   buttonLayout->addWidget(mAiChat);
   buttonLayout->addWidget(mCommit);
   buttonLayout->addWidget(mCommitAndPush);
@@ -602,7 +626,11 @@ void CommitEditor::commitAndPush() {
     return;
 
   mMessage->clear();
-  view->push();
+
+  git::Reference head = view->repo().head();
+  git::Branch branch = head;
+  git::Remote remote = branch ? branch.remote() : git::Remote();
+  view->push(remote, head);
 }
 
 void CommitEditor::abortRebase() {
@@ -769,18 +797,19 @@ void CommitEditor::generateAiMessage() {
 
   mGenerateSpinner->start(tr("Generating…"));
 
-  AiService::instance()->chat(prompt, 256, [this](const QString &text, const QString &error) {
-    mGenerateSpinner->stop();
-
-    if (!error.isEmpty()) {
-      QMessageBox::warning(this, tr("AI Commit Message"),
-                           tr("Request failed: %1").arg(error));
-      return;
-    }
-
-    mMessage->setPlainText(text);
-    mMessage->setFocus();
-  });
+  TaskDispatcher::instance()->submit(
+      TaskDispatcher::TaskType::CommitMsg, prompt,
+      [this](const TaskDispatcher::TaskResult &r) {
+        mGenerateSpinner->stop();
+        if (!r.error.isEmpty()) {
+          QMessageBox::warning(this, tr("AI Commit Message"),
+                               tr("Request failed: %1").arg(r.error));
+          return;
+        }
+        mMessage->setPlainText(r.text);
+        mMessage->setFocus();
+      },
+      TaskDispatcher::Priority::Normal, 256);
 }
 
 static QString headSha(const git::Repository &repo) {
@@ -823,35 +852,38 @@ void CommitEditor::reviewCode() {
 
   KnowledgeBase *kb = KnowledgeBase::instance();
 
+  RepoView *view = RepoView::parentView(this);
+  DoubleTreeWidget *dtw = view ? view->doubleTreeWidget() : nullptr;
+
   // Step 1: Exact diff hash lookup
   if (kb->isEnabled()) {
     QString cached = kb->findExactReview(diff);
     if (!cached.isEmpty()) {
       kb->incrementCacheHits();
-      CodeReviewDialog *dlg = new CodeReviewDialog(
-          cached, diff, headSha(mRepo), mRepo, this);
-      dlg->open();
+      if (dtw)
+        dtw->showReview(cached, diff);
       return;
     }
   }
 
   mReviewSpinner->start(tr("Reviewing…"));
+  if (dtw)
+    dtw->startReviewSpinner();
 
   // Step 2: Semantic similarity check (async)
   if (kb->isEnabled()) {
     QStringList hunks = extractHunkTexts(diff);
     if (!hunks.isEmpty()) {
       kb->findSimilarFindings(hunks,
-          [this, diff, kb](KnowledgeBase::MatchResult result) {
+          [this, diff, kb, dtw](KnowledgeBase::MatchResult result) {
         if (result.sufficient) {
           kb->incrementCacheHits();
           mReviewSpinner->stop();
 
           QString composed =
               FindingParser::composeReviewFromFindings(result.findings);
-          CodeReviewDialog *dlg = new CodeReviewDialog(
-              composed, diff, headSha(mRepo), mRepo, this);
-          dlg->open();
+          if (dtw)
+            dtw->showReview(composed, diff);
           return;
         }
 
@@ -869,44 +901,129 @@ void CommitEditor::reviewCode() {
   performFullReview(diff);
 }
 
+void CommitEditor::reviewRepo() {
+  if (!mRepo.isValid()) return;
+
+  RepoView *view = RepoView::parentView(this);
+  DoubleTreeWidget *dtw = view ? view->doubleTreeWidget() : nullptr;
+
+  QString workdir = mRepo.workdir().path();
+
+  // List all tracked source files
+  QProcess git;
+  git.setWorkingDirectory(workdir);
+  git.start("git", {"ls-files"});
+  if (!git.waitForFinished(5000) || git.exitCode() != 0) {
+    QMessageBox::warning(this, tr("Review Repo"),
+                         tr("Failed to list repository files."));
+    return;
+  }
+
+  static QSet<QString> srcExts = {
+      "cpp", "c", "h", "hpp", "cxx", "cc", "hxx",
+      "py", "js", "ts", "jsx", "tsx", "java", "rs", "go",
+      "rb", "swift", "kt", "cs", "m", "mm", "qml"};
+
+  QStringList allFiles =
+      QString::fromUtf8(git.readAllStandardOutput())
+          .split('\n', Qt::SkipEmptyParts);
+
+  QStringList sourceFiles;
+  for (const QString &f : allFiles) {
+    QString ext = QFileInfo(f).suffix().toLower();
+    if (srcExts.contains(ext))
+      sourceFiles.append(f);
+  }
+
+  if (sourceFiles.isEmpty()) {
+    QMessageBox::information(this, tr("Review Repo"),
+                             tr("No source files found in repository."));
+    return;
+  }
+
+  // Collect file contents up to budget
+  const int maxBytes = 48000;
+  QByteArray payload;
+  int filesIncluded = 0;
+
+  for (const QString &f : sourceFiles) {
+    QFile file(workdir + "/" + f);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
+    QByteArray content = file.readAll();
+    file.close();
+    if (content.isEmpty()) continue;
+
+    QByteArray block = "\n=== " + f.toUtf8() + " ===\n" + content + "\n";
+    if (payload.size() + block.size() > maxBytes) {
+      payload += "\n[" +
+          QByteArray::number(sourceFiles.size() - filesIncluded) +
+          " more files truncated]\n";
+      break;
+    }
+    payload += block;
+    ++filesIncluded;
+  }
+
+  mReviewSpinner->start(tr("Reviewing repo…"));
+  if (dtw)
+    dtw->startReviewSpinner();
+
+  QString prompt = QStringLiteral(
+      "Review the following source code files from a repository. "
+      "Analyze for bugs, security vulnerabilities, memory issues, "
+      "race conditions, and code quality problems.\n"
+      "For each issue found:\n"
+      "- State severity: CRITICAL / HIGH / MEDIUM / LOW\n"
+      "- Identify the file and approximate line\n"
+      "- Explain the problem concisely\n"
+      "- Suggest a fix\n\n"
+      "If no issues are found, say so clearly.\n\n%1")
+      .arg(QString::fromUtf8(payload));
+
+  // Dummy diff for Fix Issues (empty — fixes use file paths from review)
+  QByteArray fakeDiff = "repo-review";
+
+  TaskDispatcher::instance()->submit(
+      TaskDispatcher::TaskType::Review, prompt,
+      [this, dtw, fakeDiff](const TaskDispatcher::TaskResult &r) {
+        mReviewSpinner->stop();
+        if (!r.error.isEmpty()) {
+          if (dtw)
+            dtw->showReview(tr("**Review failed:** %1").arg(r.error), fakeDiff);
+          return;
+        }
+        if (dtw)
+          dtw->showReview(r.text, fakeDiff);
+      },
+      TaskDispatcher::Priority::Normal, AiService::ReviewMaxTokens);
+}
+
 void CommitEditor::performFullReview(const QByteArray &diff) {
-  auto sendReview = [this, diff](const QString &codebaseContext) {
-    QString prompt =
-        QStringLiteral(
-            "Review the following git diff for bugs, security vulnerabilities, "
-            "and code quality issues.\n"
-            "For each issue found:\n"
-            "- State severity: CRITICAL / HIGH / MEDIUM / LOW\n"
-            "- Identify the file and approximate line\n"
-            "- Explain the problem concisely\n"
-            "- Suggest a fix\n\n"
-            "If no issues are found, say so clearly.\n\n");
+  RepoView *view = RepoView::parentView(this);
+  DoubleTreeWidget *dtw = view ? view->doubleTreeWidget() : nullptr;
 
-    if (!codebaseContext.isEmpty())
-      prompt += codebaseContext + "\n";
+  auto sendReview = [this, diff, dtw](const QString &codebaseContext) {
+    QString prompt = AiService::reviewPrompt(diff, {}, {}, codebaseContext);
 
-    prompt += QString::fromUtf8(diff);
+    TaskDispatcher::instance()->submit(
+        TaskDispatcher::TaskType::Review, prompt,
+        [this, diff, dtw](const TaskDispatcher::TaskResult &r) {
+          mReviewSpinner->stop();
+          if (!r.error.isEmpty()) {
+            if (dtw)
+              dtw->showReview(tr("**Review failed:** %1").arg(r.error), diff);
+            return;
+          }
+          if (dtw)
+            dtw->showReview(r.text, diff);
 
-    AiService::instance()->chat(prompt, 1024,
-        [this, diff](const QString &text, const QString &error) {
-      mReviewSpinner->stop();
-
-      if (!error.isEmpty()) {
-        QMessageBox::warning(this, tr("Code Review"),
-                             tr("Request failed: %1").arg(error));
-        return;
-      }
-
-      CodeReviewDialog *dlg = new CodeReviewDialog(
-          text, diff, headSha(mRepo), mRepo, this);
-      dlg->open();
-
-      KnowledgeBase *kb = KnowledgeBase::instance();
-      if (kb->isEnabled()) {
-        QList<KnowledgeBase::Finding> findings = FindingParser::parse(text);
-        kb->storeReview(diff, mRepo.workdir().path(), text, findings);
-      }
-    });
+          KnowledgeBase *kb = KnowledgeBase::instance();
+          if (kb->isEnabled()) {
+            QList<KnowledgeBase::Finding> findings = FindingParser::parse(r.text);
+            kb->storeReview(diff, mRepo.workdir().path(), r.text, findings);
+          }
+        },
+        TaskDispatcher::Priority::Normal, AiService::ReviewMaxTokens);
   };
 
   // Search codebase index for relevant context

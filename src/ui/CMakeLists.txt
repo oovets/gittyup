@@ -6,6 +6,7 @@ add_library(
   BlameMargin.cpp
   ChatPanel.cpp
   ColumnView.cpp
+  TerminalPanel.cpp
   CommitList.cpp
   CommitToolBar.cpp
   CodeReviewDialog.cpp
@@ -42,6 +43,7 @@ add_library(
   RemoteCallbacks.cpp
   SearchField.cpp
   SideBar.cpp
+  StatusBar.cpp
   SshDialog.cpp
   StateAction.cpp
   StatePushButton.cpp
@@ -79,6 +81,7 @@ target_link_libraries(
   plugins
   tools
   update
+  vterm
   watcher
   Qt6::Concurrent
   Qt6::Network

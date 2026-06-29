@@ -9,6 +9,7 @@
 
 #include "RepoView.h"
 #include "ChatPanel.h"
+#include "TerminalPanel.h"
 #include "BlameEditor.h"
 #include "CommitList.h"
 #include "CommitToolBar.h"
@@ -61,6 +62,7 @@
 #include <QtNetwork>
 #include <QPushButton>
 #include <QSettings>
+#include <QTabWidget>
 #include <QShortcut>
 #include <QTimeLine>
 #include <QUrl>
@@ -431,17 +433,26 @@ RepoView::RepoView(const git::Repository &repo, MainWindow *parent)
 
   mChatPanel = new ChatPanel(mRepo, this);
 
+  mTerminal = new TerminalView(this);
+  mTerminal->setWorkingDirectory(mRepo.workdir().path());
+
+  mBottomTabs = new QTabWidget(this);
+  mBottomTabs->setTabPosition(QTabWidget::South);
+  mBottomTabs->addTab(mLogView, tr("Log"));
+  mBottomTabs->addTab(mChatPanel, tr("Chat"));
+  mBottomTabs->addTab(mTerminal, tr("Terminal"));
+
   addWidget(mDetailSplitter);
-  addWidget(mChatPanel);
-  addWidget(mLogView);
+  addWidget(mBottomTabs);
   setCollapsible(0, false);
   setStretchFactor(0, 1);
-  setSizes({1, 0, 0});
+  setSizes({1, 0});
 
   connect(this, &QSplitter::splitterMoved, [this] {
     QList<int> s = sizes();
-    mIsChatVisible = (s.size() > 1 && s.at(1) > 0);
-    mIsLogVisible = (s.size() > 2 && s.at(2) > 0);
+    mBottomPanelVisible = (s.size() > 1 && s.at(1) > 0);
+    mIsLogVisible = mBottomPanelVisible && mBottomTabs->currentIndex() == 0;
+    mIsChatVisible = mBottomPanelVisible && mBottomTabs->currentIndex() == 1;
   });
 
   // Restore splitter state.
@@ -458,6 +469,23 @@ void RepoView::diffSelected(const git::Diff diff, const QString &file,
   mHistory->update(diff.isValid() ? location() : Location(),
                    spontaneous); // TODO: why this changes diff?
   mDetails->setDiff(diff2, file, mPathspec->pathspec());
+
+  if (diff2.isValid()) {
+    QString ctx;
+    QList<git::Commit> sel = commits();
+    if (!sel.isEmpty()) {
+      git::Commit c = sel.first();
+      ctx += QStringLiteral("Selected commit: %1\nAuthor: %2\nMessage: %3\n\n")
+                 .arg(c.shortId(), c.author().name(), c.message());
+    }
+    QByteArray raw = diff2.print();
+    if (raw.size() > 8000)
+      raw = raw.left(8000) + "\n[truncated]";
+    ctx += QString::fromUtf8(raw);
+    mChatPanel->setDiffContext(ctx);
+  } else {
+    mChatPanel->clearContext();
+  }
 }
 
 RepoView::~RepoView() {
@@ -511,6 +539,10 @@ bool RepoView::isUnstageEnabled() const { return mDetails->isUnstageEnabled(); }
 RepoView::ViewMode RepoView::viewMode() const { return mDetails->viewMode(); }
 
 void RepoView::setViewMode(ViewMode mode) { mDetails->setViewMode(mode, true); }
+
+DoubleTreeWidget *RepoView::doubleTreeWidget() const {
+  return mDetails->doubleTreeWidget();
+}
 
 bool RepoView::isWorkingDirectoryDirty() const {
   git::Diff status = mCommits->status();
@@ -876,33 +908,14 @@ void RepoView::cancelIndexing() {
 bool RepoView::isLogVisible() const { return mIsLogVisible; }
 
 void RepoView::setLogVisible(bool visible) {
-  if (visible == mIsLogVisible)
-    return;
-
   mIsLogVisible = visible;
-
-  // Update interface.
+  if (visible) {
+    showBottomTab(0);
+  } else if (mBottomTabs->currentIndex() == 0) {
+    setBottomPanelVisible(false);
+  }
   toolBar()->updateView();
   MenuBar::instance(this)->updateView();
-
-  // Animate log view sliding in or out.
-  int pos = visible ? mLogView->sizeHint().height() : sizes().last();
-
-  QTimeLine *timeline = new QTimeLine(250, this);
-  timeline->setDirection(visible ? QTimeLine::Forward : QTimeLine::Backward);
-  timeline->setEasingCurve(QEasingCurve(QEasingCurve::Linear));
-  timeline->setUpdateInterval(20);
-
-  int chatSize = mIsChatVisible ? sizes().at(1) : 0;
-  connect(timeline, &QTimeLine::valueChanged, this,
-          [this, pos, chatSize](qreal value) {
-            setSizes({1, chatSize, static_cast<int>(pos * value)});
-          });
-
-  connect(timeline, &QTimeLine::finished,
-          [timeline] { timeline->deleteLater(); });
-
-  timeline->start();
 }
 
 bool RepoView::isChatVisible() const { return mIsChatVisible; }
@@ -910,34 +923,49 @@ bool RepoView::isChatVisible() const { return mIsChatVisible; }
 ChatPanel *RepoView::chatPanel() const { return mChatPanel; }
 
 void RepoView::setChatVisible(bool visible) {
-  if (visible == mIsChatVisible)
-    return;
-
   mIsChatVisible = visible;
-
+  if (visible) {
+    showBottomTab(1);
+    if (QLineEdit *le = mChatPanel->findChild<QLineEdit *>())
+      le->setFocus();
+  } else if (mBottomTabs->currentIndex() == 1) {
+    setBottomPanelVisible(false);
+  }
   toolBar()->updateView();
   MenuBar::instance(this)->updateView();
+}
 
-  int pos = visible ? 300 : sizes().at(1);
+bool RepoView::isBottomPanelVisible() const { return mBottomPanelVisible; }
+
+void RepoView::setBottomPanelVisible(bool visible) {
+  if (visible == mBottomPanelVisible)
+    return;
+  mBottomPanelVisible = visible;
+
+  int target = visible ? 300 : sizes().at(1);
 
   QTimeLine *timeline = new QTimeLine(250, this);
   timeline->setDirection(visible ? QTimeLine::Forward : QTimeLine::Backward);
   timeline->setEasingCurve(QEasingCurve(QEasingCurve::Linear));
   timeline->setUpdateInterval(20);
 
-  int logSize = mIsLogVisible ? sizes().last() : 0;
   connect(timeline, &QTimeLine::valueChanged, this,
-          [this, pos, logSize](qreal value) {
-            setSizes({1, static_cast<int>(pos * value), logSize});
+          [this, target](qreal value) {
+            setSizes({1, static_cast<int>(target * value)});
           });
-
-  connect(timeline, &QTimeLine::finished,
-          [timeline] { timeline->deleteLater(); });
-
+  connect(timeline, &QTimeLine::finished, timeline, &QTimeLine::deleteLater);
   timeline->start();
 
-  if (visible)
-    mChatPanel->findChild<QLineEdit *>()->setFocus();
+  mIsLogVisible = visible && mBottomTabs->currentIndex() == 0;
+  mIsChatVisible = visible && mBottomTabs->currentIndex() == 1;
+  toolBar()->updateView();
+  MenuBar::instance(this)->updateView();
+}
+
+void RepoView::showBottomTab(int index) {
+  mBottomTabs->setCurrentIndex(index);
+  if (!mBottomPanelVisible)
+    setBottomPanelVisible(true);
 }
 
 LogEntry *RepoView::addLogEntry(const QString &text, const QString &title,

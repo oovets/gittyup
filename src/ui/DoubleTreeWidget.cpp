@@ -21,13 +21,26 @@
 #include "git/Index.h"
 #include "git/Config.h"
 
+#include "RepoView.h"
+#include "ai/AiService.h"
+#include "ai/TaskDispatcher.h"
+
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QSettings>
 #include <QStackedWidget>
 #include <QButtonGroup>
+#include <QTextBrowser>
+#include <QCheckBox>
+#include <QRegularExpression>
+#include <QDirIterator>
+#include <QFile>
+#include <QFileInfo>
+#include <QPointer>
+#include <QScrollBar>
 #include <qnamespace.h>
 #include <qtreeview.h>
 
@@ -91,6 +104,8 @@ DoubleTreeWidget::DoubleTreeWidget(const git::Repository &repo, QWidget *parent)
   segmentedButton->addButton(blameView, tr("Show Blame Editor"), true);
   QPushButton *diffView = new QPushButton(tr("Diff"), this);
   segmentedButton->addButton(diffView, tr("Show Diff View"), true);
+  QPushButton *reviewView = new QPushButton(tr("Review"), this);
+  segmentedButton->addButton(reviewView, tr("Show AI Code Review"), true);
 
   // Context button.
   ContextMenuButton *contextButton = new ContextMenuButton(this);
@@ -125,6 +140,117 @@ DoubleTreeWidget::DoubleTreeWidget(const git::Repository &repo, QWidget *parent)
   mDiffView = new DiffView(repo, this);
   mFileView->addWidget(mEditor);
   mFileView->addWidget(mDiffView);
+
+  mReviewContainer = new QWidget(this);
+  QVBoxLayout *reviewLayout = new QVBoxLayout(mReviewContainer);
+  reviewLayout->setContentsMargins(0, 0, 0, 0);
+  reviewLayout->setSpacing(0);
+
+  mReviewPanel = new QTextBrowser(mReviewContainer);
+  mReviewPanel->setOpenExternalLinks(true);
+  mReviewPanel->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+  mReviewPanel->setLineWrapMode(QTextBrowser::WidgetWidth);
+
+  mFixBtn = new QPushButton(tr("Fix Issues"), mReviewContainer);
+  mFixBtn->setMinimumHeight(32);
+  mFixBtn->setStyleSheet(
+      "QPushButton { background:#1565c0; color:#fff; border:none; "
+      "font-weight:bold; font-size:13px; padding:6px; }"
+      "QPushButton:hover { background:#1976d2; }"
+      "QPushButton:disabled { background:#555; color:#999; }");
+  mFixBtn->setVisible(false);
+  connect(mFixBtn, &QPushButton::clicked, this, [this] {
+    if (mLastReviewDiff.isEmpty()) return;
+    mFixBtn->setEnabled(false);
+    mFixBtn->setText(tr("Fixing..."));
+
+    QString review = mLastReviewText;
+    QString diff = QString::fromUtf8(mLastReviewDiff);
+    QString prompt =
+        QStringLiteral(
+            "You are a code fixer. Output ONLY fix blocks.\n\n"
+            "CRITICAL RULES:\n"
+            "1. Each fix is ONE block. ONE block per change.\n"
+            "2. If two changes are in different files, use TWO blocks.\n"
+            "3. If two changes are in the same file but different locations, "
+            "use TWO blocks.\n"
+            "4. FIND text must be EXACT copy from the source file.\n"
+            "5. Get file paths from the diff headers (--- a/path or +++ b/path).\n"
+            "6. No markdown. No code fences. No explanations. ONLY blocks.\n\n"
+            "FORMAT (repeat for each fix):\n\n"
+            "FILE: src/ui/SomeFile.cpp\n"
+            "FIND:\n"
+            "exact lines from source\n"
+            "REPLACE:\n"
+            "corrected lines\n"
+            "---\n\n"
+            "Issues found in review:\n\n") +
+        review + "\n\nDiff for context:\n\n" + diff;
+
+    // Show live streaming area
+    mReviewPanel->append(
+        "<div style='margin-top:12px; border-left:3px solid #546e7a; "
+        "padding:6px 10px;'>"
+        "<b style='color:#90caf9;'>Generating fixes...</b></div>");
+
+    QPointer<DoubleTreeWidget> self = this;
+    TaskDispatcher::instance()->submitStreaming(
+        TaskDispatcher::TaskType::Chat, prompt,
+        [self](const QString &chunk) {
+          if (!self) return;
+          QMetaObject::invokeMethod(self, [self, chunk] {
+            QTextCursor cursor = self->mReviewPanel->textCursor();
+            cursor.movePosition(QTextCursor::End);
+            cursor.insertText(chunk);
+            self->mReviewPanel->verticalScrollBar()->setValue(
+                self->mReviewPanel->verticalScrollBar()->maximum());
+          });
+        },
+        [self](const QString &text, const QString &error) {
+          if (!self) return;
+          QMetaObject::invokeMethod(self, [self, text, error] {
+            QString doc = self->mReviewPanel->toHtml();
+            int streamStart = doc.lastIndexOf("Generating fixes...");
+            if (streamStart >= 0) {
+              QTextCursor findCur = self->mReviewPanel->document()->find(
+                  "Generating fixes...");
+              if (!findCur.isNull()) {
+                findCur.movePosition(QTextCursor::StartOfBlock);
+                findCur.movePosition(QTextCursor::End, QTextCursor::KeepAnchor);
+                findCur.removeSelectedText();
+              }
+            }
+
+            if (!error.isEmpty()) {
+              self->mFixBtn->setEnabled(true);
+              self->mFixBtn->setText(QObject::tr("Fix Issues"));
+              self->mReviewPanel->append(
+                  "<p style='color:#e57373;'>Fix request failed: " +
+                  error.toHtmlEscaped() + "</p>");
+              return;
+            }
+            self->applyFixBlocks(text);
+          });
+        },
+        TaskDispatcher::Priority::High, 4096);
+  });
+
+  mHideFixedCb = new QCheckBox(tr("Hide fixed"), mReviewContainer);
+  mHideFixedCb->setVisible(false);
+  connect(mHideFixedCb, &QCheckBox::toggled, this, [this] {
+    showReview(mLastReviewText, mLastReviewDiff);
+  });
+
+  QHBoxLayout *reviewBtnRow = new QHBoxLayout;
+  reviewBtnRow->setContentsMargins(0, 0, 0, 0);
+  reviewBtnRow->addWidget(mHideFixedCb);
+  reviewBtnRow->addStretch();
+  reviewBtnRow->addWidget(mFixBtn);
+
+  reviewLayout->addWidget(mReviewPanel, 1);
+  reviewLayout->addLayout(reviewBtnRow);
+
+  mFileView->addWidget(mReviewContainer);
 
   fileViewLayout->addLayout(buttonLayout);
   fileViewLayout->addWidget(mFileView);
@@ -216,7 +342,7 @@ DoubleTreeWidget::DoubleTreeWidget(const git::Repository &repo, QWidget *parent)
 
   // splitter between editor/diffview and TreeViews
   QSplitter *splitter = new QSplitter(Qt::Horizontal, this);
-  splitter->setHandleWidth(0);
+  splitter->setHandleWidth(1);
   splitter->addWidget(fileView);
   splitter->addWidget(treeViewSplitter);
   splitter->setStretchFactor(0, 3);
@@ -227,6 +353,7 @@ DoubleTreeWidget::DoubleTreeWidget(const git::Repository &repo, QWidget *parent)
   // commitlist is visible and is is not possible to get the
   // diffview visible again.
   splitter->setCollapsible(0, false);
+  splitter->setCollapsible(1, false);
   connect(splitter, &QSplitter::splitterMoved, this, [splitter] {
     QSettings().setValue(kSplitterKey, splitter->saveState());
   });
@@ -645,4 +772,564 @@ void DoubleTreeWidget::toggleCollapseUnstagedFiles() {
     unstagedFiles->expandAll();
   else
     unstagedFiles->collapseAll();
+}
+
+static QString severityColor(const QString &sev) {
+  QString s = sev.toUpper().trimmed();
+  if (s == "CRITICAL") return "#d32f2f";
+  if (s == "HIGH")     return "#e65100";
+  if (s == "MEDIUM")   return "#f9a825";
+  if (s == "LOW")      return "#2e7d32";
+  return "#546e7a";
+}
+
+static QString inlineFmt(const QString &text) {
+  QString s = text.toHtmlEscaped();
+  static QRegularExpression codeRe("`([^`]+)`");
+  s.replace(codeRe, "<code>\\1</code>");
+  static QRegularExpression boldRe("\\*\\*([^*]+)\\*\\*");
+  s.replace(boldRe, "\\1");
+  return s;
+}
+
+static QString issueKey(const QString &file, const QString &title) {
+  return file.toLower().trimmed() + "|" + title.toLower().trimmed();
+}
+
+static QString formatReviewHtml(const QString &raw, const QWidget *w,
+                                const QSet<QString> &fixedKeys = {},
+                                bool hideFixed = false) {
+  QFont baseFont = w->font();
+#ifdef Q_OS_MAC
+  baseFont.setPointSize(13);
+#endif
+  int basePt = baseFont.pointSize();
+  int smallPt = basePt - 1;
+  QString fg = w->palette().color(QPalette::Text).name();
+  QString dimFg = w->palette().color(QPalette::PlaceholderText).name();
+  QString bgAlt = w->palette().color(QPalette::AlternateBase).name();
+
+  QString css = QStringLiteral(
+      "<style>"
+      "body { font-family: '%1'; font-size: %2pt; color: %3; margin:0; padding:8px; word-wrap:break-word; }"
+      "code { background:%4; padding:1px 3px; }"
+      ".dim { color:%5; }"
+      ".issue { border-left:3px solid; padding:6px 0 10px 10px; margin:12px 0; overflow-wrap:break-word; }"
+      ".badge { color:#fff; padding:2px 8px; font-weight:bold; font-size:%6pt; border-radius:3px; }"
+      ".title { font-weight:bold; margin-left:6px; }"
+      ".issue-num { color:%5; font-size:%6pt; margin-right:4px; }"
+      ".detail { color:%5; margin-top:4px; line-height:1.4; }"
+      ".file-ref { color:#64b5f6; margin-top:4px; }"
+      ".fix { color:#81c784; margin-top:6px; }"
+      ".fix-label { font-weight:bold; color:#81c784; }"
+      "pre { background:%4; padding:4px 6px; font-size:%6pt; margin:4px 0 0 0; }"
+      ".separator { height:1px; background:%4; margin:8px 0; }"
+      "</style>")
+      .arg(baseFont.family())
+      .arg(basePt)
+      .arg(fg, bgAlt, dimFg)
+      .arg(smallPt);
+
+  static QRegularExpression sevRe(
+      "\\b(CRITICAL|HIGH|MEDIUM|LOW)\\b",
+      QRegularExpression::CaseInsensitiveOption);
+
+  bool hasIssues = sevRe.match(raw).hasMatch();
+
+  if (!hasIssues) {
+    QString clean = raw;
+    clean.remove(QRegularExpression("^#+.*$", QRegularExpression::MultilineOption));
+    clean = clean.trimmed();
+    return css +
+        QStringLiteral(
+            "<body>"
+            "<span class='badge' style='background:#2e7d32;'>PASS</span> "
+            "<span style='color:#a5d6a7;'>No issues found</span>"
+            "<p class='dim'>%1</p>"
+            "</body>")
+            .arg(inlineFmt(clean));
+  }
+
+  struct Issue {
+    QString severity, title, file, problem, fix;
+  };
+
+  QList<Issue> issues;
+  Issue cur;
+  bool parsing = false;
+  bool inCode = false;
+  QString codeAccum;
+
+  for (const QString &line : raw.split('\n')) {
+    QString t = line.trimmed();
+
+    if (t.startsWith("```")) {
+      inCode = !inCode;
+      if (!inCode && !codeAccum.isEmpty()) {
+        cur.fix += "\n" + codeAccum;
+        codeAccum.clear();
+      }
+      continue;
+    }
+    if (inCode) { codeAccum += t + "\n"; continue; }
+
+    auto sm = sevRe.match(t);
+    if (sm.hasMatch()) {
+      if (!cur.severity.isEmpty()) issues.append(cur);
+      cur = Issue();
+      cur.severity = sm.captured(1).toUpper();
+      QString rest = t;
+      rest.remove(QRegularExpression("^#+\\s*"));
+      rest.remove(QRegularExpression("\\*+"));
+      rest.remove(QRegularExpression("\\(?" + cur.severity + "\\)?",
+                                     QRegularExpression::CaseInsensitiveOption));
+      rest.remove(QRegularExpression("^[:\\-\\s]+"));
+      rest.remove(QRegularExpression("^\\d+\\.\\s*"));
+      rest.remove(QRegularExpression("(?:severity|Severity)[:\\s]*",
+                                     QRegularExpression::CaseInsensitiveOption));
+      cur.title = rest.trimmed();
+      parsing = true;
+      continue;
+    }
+
+    if (!parsing) continue;
+
+    // Skip markdown separators and sub-headers that leak from AI
+    if (QRegularExpression("^-{3,}$").match(t).hasMatch()) continue;
+    if (QRegularExpression("^#{2,}\\s").match(t).hasMatch()) continue;
+
+    static QRegularExpression fileRe(
+        "^[\\*\\-]*\\s*\\*{0,2}(?:File|Location)[:\\s]*\\*{0,2}\\s*(.+)",
+        QRegularExpression::CaseInsensitiveOption);
+    static QRegularExpression probRe(
+        "^[\\*\\-]*\\s*\\*{0,2}(?:Problem|Issue|Description)[:\\s]*\\*{0,2}\\s*(.+)",
+        QRegularExpression::CaseInsensitiveOption);
+    static QRegularExpression fixRe(
+        "^[\\*\\-]*\\s*\\*{0,2}(?:Fix|Suggestion|Recommended|Solution)[:\\s]*\\*{0,2}\\s*(.+)",
+        QRegularExpression::CaseInsensitiveOption);
+
+    auto fm = fileRe.match(t);
+    if (fm.hasMatch()) { cur.file = fm.captured(1).trimmed(); cur.file.remove('`'); cur.file.remove(QRegularExpression("^[:\\s]+")); continue; }
+    auto pm = probRe.match(t);
+    if (pm.hasMatch()) { QString p = pm.captured(1).trimmed(); p.remove(QRegularExpression("^[:\\s]+")); cur.problem = p; continue; }
+    auto xm = fixRe.match(t);
+    if (xm.hasMatch()) { QString x = xm.captured(1).trimmed(); x.remove(QRegularExpression("^[:\\s]+")); cur.fix = x; continue; }
+
+    if (!t.isEmpty()) {
+      if (cur.problem.isEmpty() && cur.title.isEmpty()) cur.title = t;
+      else if (cur.problem.isEmpty()) cur.problem = t;
+      else cur.problem += " " + t;
+    }
+  }
+  if (!cur.severity.isEmpty()) issues.append(cur);
+
+  // Clean trailing markdown artifacts from all fields
+  static QRegularExpression trailingMd("\\s*-{3,}.*$");
+  for (Issue &i : issues) {
+    i.title.remove(trailingMd);
+    i.problem.remove(trailingMd);
+    i.fix.remove(trailingMd);
+    i.title = i.title.trimmed();
+    i.problem = i.problem.trimmed();
+    i.fix = i.fix.trimmed();
+  }
+
+  // Filter out non-issues: summary lines the AI emits that happen to
+  // contain a severity keyword but have no file, no problem, and no fix.
+  issues.erase(std::remove_if(issues.begin(), issues.end(),
+      [](const Issue &i) {
+        bool hasSubstance = !i.file.isEmpty() || !i.fix.isEmpty();
+        if (hasSubstance) return false;
+
+        // Title-only "issues" that are really summary text
+        QString t = i.title.toLower() + " " + i.problem.toLower();
+        if (t.contains("no ") && (t.contains("found") || t.contains("identified")
+            || t.contains("detected") || t.contains("vulnerabilit")))
+          return true;
+        if (t.contains("unlikely to cause") || t.contains("overall")
+            || t.contains("summary") || t.contains("code quality issues were"))
+          return true;
+
+        // No problem description and title looks like a preamble
+        if (i.problem.isEmpty() && i.fix.isEmpty()
+            && (i.title.contains("issues") || i.title.contains("were identified")
+                || i.title.contains("were noted") || i.title.contains("were found")))
+          return true;
+
+        return false;
+      }), issues.end());
+
+  std::sort(issues.begin(), issues.end(),
+            [](const Issue &a, const Issue &b) {
+              auto ord = [](const QString &s) {
+                if (s == "CRITICAL") return 0;
+                if (s == "HIGH") return 1;
+                if (s == "MEDIUM") return 2;
+                return 3;
+              };
+              return ord(a.severity) < ord(b.severity);
+            });
+
+  // Count by severity
+  int crit = 0, high = 0, med = 0, low = 0;
+  for (const Issue &i : issues) {
+    if (i.severity == "CRITICAL") ++crit;
+    else if (i.severity == "HIGH") ++high;
+    else if (i.severity == "MEDIUM") ++med;
+    else ++low;
+  }
+
+  QString html = css + "<body>";
+
+  // Summary header
+  if (issues.isEmpty()) {
+    html += "<b style='color:#81c784;'>No issues found</b><br>"
+            "<span class='dim'>The code looks clean.</span>";
+    html += "</body>";
+    return html;
+  }
+
+  html += QStringLiteral("<b>Found %1 issue%2</b><br>")
+              .arg(issues.size())
+              .arg(issues.size() == 1 ? "" : "s");
+
+  QStringList counts;
+  if (crit > 0) counts << QStringLiteral("<span style='color:#d32f2f;'>%1 Critical</span>").arg(crit);
+  if (high > 0) counts << QStringLiteral("<span style='color:#e65100;'>%1 High</span>").arg(high);
+  if (med > 0)  counts << QStringLiteral("<span style='color:#f9a825;'>%1 Medium</span>").arg(med);
+  if (low > 0)  counts << QStringLiteral("<span style='color:#2e7d32;'>%1 Low</span>").arg(low);
+  html += "<span class='dim'>" + counts.join(" &middot; ") + "</span>";
+
+  html += "<div class='separator'></div>";
+
+  // Each issue
+  int shown = 0;
+  for (int i = 0; i < issues.size(); ++i) {
+    const Issue &issue = issues[i];
+    QString key = issueKey(issue.file, issue.title);
+    bool fixed = fixedKeys.contains(key);
+
+    if (fixed && hideFixed)
+      continue;
+
+    ++shown;
+    QString color = severityColor(issue.severity);
+
+    if (fixed)
+      html += QStringLiteral(
+          "<div class='issue' style='border-color:%1; opacity:0.45;'>").arg(color);
+    else
+      html += QStringLiteral(
+          "<div class='issue' style='border-color:%1;'>").arg(color);
+
+    // Header: number + badge + title
+    html += QStringLiteral(
+                "<span class='issue-num'>#%1</span>"
+                "<span class='badge' style='background:%2;'>%3</span>")
+                .arg(i + 1)
+                .arg(color, issue.severity);
+    if (fixed)
+      html += QStringLiteral(
+          "<span class='title' style='text-decoration:line-through;'>%1</span>"
+          " <span style='color:#81c784;'>&#x2714; fixed</span>")
+          .arg(inlineFmt(issue.title));
+    else
+      html += QStringLiteral("<span class='title'>%1</span>")
+          .arg(inlineFmt(issue.title));
+
+    // File reference
+    if (!issue.file.isEmpty()) {
+      QString f = issue.file;
+      f.remove(QRegularExpression("^[:\\s]+"));
+      html += "<div class='file-ref'>" + f.toHtmlEscaped() + "</div>";
+    }
+
+    if (!fixed) {
+      // Problem description
+      if (!issue.problem.isEmpty()) {
+        QString p = issue.problem;
+        p.remove(QRegularExpression("^[:\\s]+"));
+        html += "<div class='detail'>" + inlineFmt(p) + "</div>";
+      }
+
+      // Fix suggestion
+      if (!issue.fix.isEmpty()) {
+        QString fx = issue.fix;
+        fx.remove(QRegularExpression("^[:\\s]+"));
+        if (fx.contains('\n'))
+          html += "<div class='fix'><pre>" + fx.toHtmlEscaped() + "</pre></div>";
+        else
+          html += "<div class='fix'><span class='fix-label'>Fix: </span>"
+                  + inlineFmt(fx) + "</div>";
+      }
+    }
+
+    html += "</div>";
+  }
+
+  html += "</body>";
+  return html;
+}
+
+void DoubleTreeWidget::showReview(const QString &text, const QByteArray &diff) {
+  if (text != mLastReviewText) {
+    mFixedIssueKeys.clear();
+    mHideFixedCb->setChecked(false);
+  }
+  mLastReviewText = text;
+  mLastReviewDiff = diff;
+  bool hide = mHideFixedCb->isChecked();
+  mReviewPanel->setHtml(formatReviewHtml(text, this, mFixedIssueKeys, hide));
+  mFixBtn->setVisible(!diff.isEmpty() && !mFixedIssueKeys.contains("__all__"));
+  mHideFixedCb->setVisible(!mFixedIssueKeys.isEmpty());
+  mFileView->setCurrentIndex(Review);
+}
+
+void DoubleTreeWidget::applyFixBlocks(const QString &aiResponse) {
+  struct Fix { QString file, find, replace; };
+  QList<Fix> fixes;
+
+  QStringList blocks = aiResponse.split(QRegularExpression(R"(\n---+\n?)"),
+                                        Qt::SkipEmptyParts);
+
+  for (const QString &raw : blocks) {
+    QString block = raw.trimmed();
+    if (block.isEmpty()) continue;
+    Fix f;
+    QString section;
+    QStringList findLines, replaceLines;
+    for (const QString &line : block.split('\n')) {
+      if (line.startsWith("FILE:")) {
+        f.file = line.mid(5).trimmed();
+      } else if (line.trimmed() == "FIND:") {
+        section = "find";
+      } else if (line.trimmed() == "REPLACE:") {
+        section = "replace";
+      } else if (section == "find") {
+        findLines << line;
+      } else if (section == "replace") {
+        replaceLines << line;
+      }
+    }
+    f.find = findLines.join('\n');
+    f.replace = replaceLines.join('\n');
+    if (!f.file.isEmpty() && !f.find.isEmpty())
+      fixes.append(f);
+  }
+
+  if (fixes.isEmpty()) {
+    mReviewPanel->append(
+        "<div style='margin-top:12px; padding:10px; "
+        "border-left:3px solid #ffb74d;'>"
+        "<b style='color:#ffb74d;'>Could not parse fix blocks</b>"
+        "<p style='color:#aaa; font-size:11px; margin-top:6px;'>"
+        "The AI response did not contain valid FILE/FIND/REPLACE blocks.<br>"
+        "First 300 chars:</p>"
+        "<pre style='background:#1e1e1e; padding:6px; font-size:10px; "
+        "color:#888; margin-top:4px;'>" +
+        aiResponse.left(300).toHtmlEscaped() + "</pre></div>");
+    return;
+  }
+
+  RepoView *view = RepoView::parentView(this);
+  if (!view) return;
+  QString workdir = view->repo().workdir().path();
+
+  struct Result {
+    QString file;
+    bool ok;
+    QString error;
+    QString find, replace;
+  };
+  QList<Result> results;
+
+  // Helper: find file by name if exact path fails
+  auto resolveFile = [&](const QString &rel) -> QString {
+    QString exact = workdir + "/" + rel;
+    if (QFile::exists(exact)) return exact;
+
+    // Try common prefix variations
+    QString basename = QFileInfo(rel).fileName();
+    QDirIterator it(workdir, {basename}, QDir::Files,
+                    QDirIterator::Subdirectories);
+    QString best;
+    while (it.hasNext()) {
+      QString candidate = it.next();
+      // Prefer match that shares the most path components
+      if (candidate.endsWith(rel)) return candidate;
+      if (best.isEmpty()) best = candidate;
+    }
+    return best.isEmpty() ? exact : best;
+  };
+
+  for (const Fix &fix : fixes) {
+    Result r;
+    r.file = fix.file;
+    if (r.file.startsWith("a/") || r.file.startsWith("b/"))
+      r.file = r.file.mid(2);
+    r.find = fix.find;
+    r.replace = fix.replace;
+
+    QString fullPath = resolveFile(r.file);
+    QFile file(fullPath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+      r.ok = false;
+      r.error = tr("file not found");
+      results.append(r);
+      continue;
+    }
+    QString content = QString::fromUtf8(file.readAll());
+    file.close();
+
+    if (fix.find.trimmed() == fix.replace.trimmed()) {
+      r.ok = false;
+      r.error = tr("no-op (find and replace are identical)");
+      results.append(r);
+      continue;
+    }
+
+    if (!content.contains(fix.find)) {
+      r.ok = false;
+      r.error = tr("search text not found in file");
+      results.append(r);
+      continue;
+    }
+
+    content.replace(fix.find, fix.replace);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+      r.ok = false;
+      r.error = tr("could not write file");
+      results.append(r);
+      continue;
+    }
+    file.write(content.toUtf8());
+    file.close();
+    r.ok = true;
+    results.append(r);
+  }
+
+  int applied = 0, failed = 0;
+  for (const Result &r : results) {
+    if (r.ok) ++applied;
+    else ++failed;
+  }
+
+  // Build styled output — inherit review panel font
+  QString html;
+  html += "<div class='separator'></div>";
+
+  // Summary line
+  QString sumColor = failed == 0 ? "#81c784" : (applied > 0 ? "#e2c08d" : "#e57373");
+  html += QStringLiteral("<b style='color:%1;'>").arg(sumColor);
+  if (applied > 0 && failed == 0)
+    html += QStringLiteral("All %1 fix(es) applied successfully").arg(applied);
+  else if (applied > 0)
+    html += QStringLiteral("%1 applied, %2 failed").arg(applied).arg(failed);
+  else
+    html += QStringLiteral("All %1 fix(es) failed").arg(failed);
+  html += "</b>";
+
+  // Per-file results
+  for (const Result &r : results) {
+    QString borderColor = r.ok ? "#81c784" : "#e57373";
+    QString icon = r.ok ? "&#x2714;" : "&#x2718;";
+    QString iconColor = r.ok ? "#81c784" : "#e57373";
+
+    html += QStringLiteral(
+        "<div class='issue' style='border-color:%1;'>").arg(borderColor);
+
+    // File header
+    html += QStringLiteral(
+        "<span style='color:%1;'>%2</span> "
+        "<span class='file-ref' style='font-weight:bold;'>%3</span>")
+        .arg(iconColor, icon, r.file.toHtmlEscaped());
+    if (!r.ok)
+      html += " <span style='color:#e57373;'>&mdash; " +
+              r.error.toHtmlEscaped() + "</span>";
+
+    // Diff
+    html += "<pre>";
+    for (const QString &line : r.find.split('\n'))
+      html += "<span style='color:#e57373;'>- " +
+              line.toHtmlEscaped() + "</span>\n";
+    for (const QString &line : r.replace.split('\n'))
+      html += "<span style='color:#81c784;'>+ " +
+              line.toHtmlEscaped() + "</span>\n";
+    html += "</pre></div>";
+  }
+
+  mReviewPanel->append(html);
+
+  // Track which issues were fixed by matching fix file to review issues
+  for (const Result &r : results) {
+    if (!r.ok) continue;
+    // Match against all issues that reference this file
+    QString fixBase = QFileInfo(r.file).fileName().toLower();
+    // Parse review to find matching issues
+    static QRegularExpression sevRe(
+        "\\b(CRITICAL|HIGH|MEDIUM|LOW)\\b",
+        QRegularExpression::CaseInsensitiveOption);
+    QString currentTitle;
+    QString currentFile;
+    for (const QString &line : mLastReviewText.split('\n')) {
+      QString t = line.trimmed();
+      auto sm = sevRe.match(t);
+      if (sm.hasMatch()) {
+        if (!currentTitle.isEmpty() && !currentFile.isEmpty()) {
+          QString base = QFileInfo(currentFile).fileName().toLower();
+          if (base == fixBase)
+            mFixedIssueKeys.insert(issueKey(currentFile, currentTitle));
+        }
+        currentFile.clear();
+        QString rest = t;
+        rest.remove(QRegularExpression("^#+\\s*"));
+        rest.remove(QRegularExpression("\\*+"));
+        rest.remove(QRegularExpression("\\(?" + sm.captured(1).toUpper() + "\\)?",
+                                       QRegularExpression::CaseInsensitiveOption));
+        rest.remove(QRegularExpression("^[:\\-\\s]+"));
+        rest.remove(QRegularExpression("^\\d+\\.\\s*"));
+        rest.remove(QRegularExpression("(?:severity|Severity)[:\\s]*",
+                                       QRegularExpression::CaseInsensitiveOption));
+        currentTitle = rest.trimmed();
+        continue;
+      }
+      static QRegularExpression fileRe(
+          "^[\\*\\-]*\\s*\\*{0,2}(?:File|Location)[:\\s]*\\*{0,2}\\s*(.+)",
+          QRegularExpression::CaseInsensitiveOption);
+      auto fm = fileRe.match(t);
+      if (fm.hasMatch()) {
+        currentFile = fm.captured(1).trimmed();
+        currentFile.remove('`');
+        currentFile.remove(QRegularExpression("^[:\\s]+"));
+      }
+    }
+    if (!currentTitle.isEmpty() && !currentFile.isEmpty()) {
+      QString base = QFileInfo(currentFile).fileName().toLower();
+      if (base == fixBase)
+        mFixedIssueKeys.insert(issueKey(currentFile, currentTitle));
+    }
+  }
+
+  // Hide button if all applied
+  if (failed == 0) {
+    mFixBtn->setVisible(false);
+    mFixedIssueKeys.insert("__all__");
+  } else {
+    mFixBtn->setEnabled(true);
+  }
+
+  mHideFixedCb->setVisible(!mFixedIssueKeys.isEmpty());
+
+  if (applied > 0) view->refresh();
+}
+
+void DoubleTreeWidget::startReviewSpinner() {
+  mReviewPanel->setHtml(
+      "<div style='font-family: -apple-system, sans-serif; padding:24px; "
+      "color:#aaa; font-size:14px;'>"
+      "&#x23F3; Reviewing code&hellip;</div>");
+  mFileView->setCurrentIndex(Review);
+}
+
+void DoubleTreeWidget::stopReviewSpinner() {
 }

@@ -18,8 +18,9 @@
 #include "app/Application.h"
 #include "conf/Settings.h"
 #include "dialogs/MergeDialog.h"
-#include "CodeReviewDialog.h"
+#include "DoubleTreeWidget.h"
 #include "ai/AiService.h"
+#include "ai/TaskDispatcher.h"
 #include "ai/CodebaseIndex.h"
 #include "index/Index.h"
 #include "git/Branch.h"
@@ -1078,6 +1079,13 @@ public:
     LayoutConstants constants = layoutConstants(compact);
 
     int lineHeight = constants.lineSpacing + constants.vMargin;
+
+    // The "Uncommitted changes" row has no commit; render it at half height.
+    git::Commit commit =
+        index.data(CommitList::Role::CommitRole).value<git::Commit>();
+    if (!commit.isValid())
+      return QSize(0, (lineHeight * (compact ? 1 : 4)) / 2);
+
     return QSize(0, lineHeight * (compact ? 1 : 4));
   }
 
@@ -1676,38 +1684,26 @@ void CommitList::contextMenuEvent(QContextMenuEvent *event) {
             QString sha = commit.id().toString().left(8);
 
             auto doReview = [view, diffBytes, sha](const QString &context) {
-              QString prompt =
-                  QStringLiteral(
-                      "Review the following git diff for commit %1. "
-                      "Analyze for bugs, security vulnerabilities, "
-                      "and code quality issues.\n"
-                      "For each issue found:\n"
-                      "- State severity: CRITICAL / HIGH / MEDIUM / LOW\n"
-                      "- Identify the file and approximate line\n"
-                      "- Explain the problem concisely\n"
-                      "- Suggest a fix\n\n"
-                      "If no issues are found, say so clearly.\n\n")
-                          .arg(sha);
+              QString prompt = AiService::reviewPrompt(diffBytes, sha, {}, context);
 
-              if (!context.isEmpty())
-                prompt += context + "\n";
+              DoubleTreeWidget *dtw = view->doubleTreeWidget();
+              if (dtw)
+                dtw->startReviewSpinner();
 
-              prompt += QString::fromUtf8(diffBytes);
-
-              AiService::instance()->chat(prompt, 4096,
-                  [view, diffBytes, sha](const QString &text,
-                                         const QString &error) {
-                    if (!error.isEmpty()) {
-                      QMessageBox::warning(
-                          view, QObject::tr("Code Review"),
-                          QObject::tr("Request failed: %1").arg(error));
+              TaskDispatcher::instance()->submit(
+                  TaskDispatcher::TaskType::Review, prompt,
+                  [view, diffBytes](const TaskDispatcher::TaskResult &r) {
+                    DoubleTreeWidget *dtw = view->doubleTreeWidget();
+                    if (!dtw)
+                      return;
+                    if (!r.error.isEmpty()) {
+                      dtw->showReview(
+                          QObject::tr("**Review failed:** %1").arg(r.error), diffBytes);
                       return;
                     }
-
-                    CodeReviewDialog *dlg = new CodeReviewDialog(
-                        text, diffBytes, sha, view->repo(), view);
-                    dlg->open();
-                  });
+                    dtw->showReview(r.text, diffBytes);
+                  },
+                  TaskDispatcher::Priority::Normal, AiService::ReviewMaxTokens);
             };
 
             CodebaseIndex *idx = CodebaseIndex::instance();
@@ -1760,14 +1756,16 @@ void CommitList::contextMenuEvent(QContextMenuEvent *event) {
 
             dlg->show();
 
-            AiService::instance()->chat(prompt, 1024,
-                [text](const QString &reply, const QString &error) {
-                  if (!error.isEmpty())
+            TaskDispatcher::instance()->submit(
+                TaskDispatcher::TaskType::Chat, prompt,
+                [text](const TaskDispatcher::TaskResult &r) {
+                  if (!r.error.isEmpty())
                     text->setPlainText(
-                        QObject::tr("Request failed: %1").arg(error));
+                        QObject::tr("Request failed: %1").arg(r.error));
                   else
-                    text->setPlainText(reply);
-                });
+                    text->setPlainText(r.text);
+                },
+                TaskDispatcher::Priority::Normal, 1024);
           });
 
       menu.addSeparator();

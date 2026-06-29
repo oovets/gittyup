@@ -32,6 +32,7 @@
 #include <QScrollArea>
 #include <QTextBrowser>
 #include "ai/AiService.h"
+#include "ai/TaskDispatcher.h"
 
 namespace {
 
@@ -1472,11 +1473,12 @@ void HunkWidget::explainHunk() {
                      "Be concise and clear. Focus on the intent and effect of the change.\n\n") +
       hunkText;
 
-  AiService::instance()->chat(prompt, 512,
-      [this, hunkText](const QString &aiText, const QString &error) {
-    if (!error.isEmpty()) {
+  TaskDispatcher::instance()->submit(
+      TaskDispatcher::TaskType::Chat, prompt,
+      [this, hunkText](const TaskDispatcher::TaskResult &r) {
+    if (!r.error.isEmpty()) {
       QMessageBox::warning(this, tr("Explain Hunk"),
-                           tr("Request failed: %1").arg(error));
+                           tr("Request failed: %1").arg(r.error));
       return;
     }
 
@@ -1488,7 +1490,7 @@ void HunkWidget::explainHunk() {
     QTextBrowser *view = new QTextBrowser(dlg);
     view->setOpenLinks(false);
     view->setFrameShape(QFrame::NoFrame);
-    view->setHtml(renderExplainHtml(hunkText, aiText));
+    view->setHtml(renderExplainHtml(hunkText, r.text));
 
     QPushButton *closeBtn = new QPushButton(tr("Close"), dlg);
     connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::accept);

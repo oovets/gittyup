@@ -1,5 +1,6 @@
 #include "CodeReviewDialog.h"
 #include "ai/AiService.h"
+#include "ai/TaskDispatcher.h"
 #include "app/Application.h"
 #include "app/Theme.h"
 
@@ -552,24 +553,26 @@ void CodeReviewDialog::onRerun() {
           "If no issues are found, say so clearly.\n\n") +
       QString::fromUtf8(mCurrentDiff);
 
-  AiService::instance()->chat(prompt, 1024,
-      [this](const QString &text, const QString &error) {
-    mRerunBtn->setEnabled(true);
-    mRerunBtn->setText(tr("Re-run"));
+  TaskDispatcher::instance()->submit(
+      TaskDispatcher::TaskType::Review, prompt,
+      [this](const TaskDispatcher::TaskResult &r) {
+        mRerunBtn->setEnabled(true);
+        mRerunBtn->setText(tr("Re-run"));
 
-    if (!error.isEmpty()) {
-      mStatus->setText(tr("Request failed: %1").arg(error));
-      return;
-    }
+        if (!r.error.isEmpty()) {
+          mStatus->setText(tr("Request failed: %1").arg(r.error));
+          return;
+        }
 
-    AiService::Config cfg = AiService::instance()->currentConfig();
-    mCurrentId = AiReviewStore::instance()->save(
-        mRepo.workdir().path(), QString(), cfg.provider, cfg.model,
-        mCurrentDiff, text);
+        AiService::Config cfg = AiService::instance()->currentConfig();
+        mCurrentId = AiReviewStore::instance()->save(
+            mRepo.workdir().path(), QString(), cfg.provider, cfg.model,
+            mCurrentDiff, r.text);
 
-    mReviewText->setHtml(renderReviewHtml(text, mCurrentDiff));
-    loadHistory();
-  });
+        mReviewText->setHtml(renderReviewHtml(r.text, mCurrentDiff));
+        loadHistory();
+      },
+      TaskDispatcher::Priority::Normal, 1024);
 }
 
 // ---------------------------------------------------------------------------
@@ -727,20 +730,20 @@ void CodeReviewDialog::onFixIssues() {
       QStringLiteral("\n\nRemember: output ONLY the FILE/FIND/REPLACE/--- blocks. "
                      "The FIND text must match exactly what is in the source file.");
 
-  AiService::instance()->chat(prompt, 4096,
-      [this](const QString &text, const QString &error) {
+  TaskDispatcher::instance()->submit(
+      TaskDispatcher::TaskType::Chat, prompt,
+      [this](const TaskDispatcher::TaskResult &r) {
         mFixBtn->setEnabled(true);
         mFixBtn->setText(tr("Fix Issues"));
 
-        if (!error.isEmpty()) {
-          mStatus->setText(tr("Request failed: %1").arg(error));
+        if (!r.error.isEmpty()) {
+          mStatus->setText(tr("Request failed: %1").arg(r.error));
           return;
         }
 
-        QList<Fix> fixes = parseFixes(text);
+        QList<Fix> fixes = parseFixes(r.text);
         if (fixes.isEmpty()) {
-          // Show first 120 chars of AI response to help diagnose format issues
-          QString preview = text.left(120).replace('\n', ' ');
+          QString preview = r.text.left(120).replace('\n', ' ');
           mStatus->setText(tr("No fixes parsed. AI said: \"%1\"").arg(preview));
           return;
         }

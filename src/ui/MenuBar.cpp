@@ -506,6 +506,13 @@ MenuBar::MenuBar(QWidget *parent) : QMenuBar(parent) {
     view->setChatVisible(!view->isChatVisible());
   });
 
+  mToggleTerminal = viewMenu->addAction(tr("Show Terminal"));
+  mToggleTerminal->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_QuoteLeft));
+  connect(mToggleTerminal, &QAction::triggered, [this] {
+    RepoView *view = this->view();
+    view->showBottomTab(2);
+  });
+
   mToggleMaximize = new StateAction(tr("Normal"), tr("Maximize"), viewMenu);
   viewMenu->addAction(mToggleMaximize);
   toggleMaximizeHotkey.use(mToggleMaximize);
@@ -1019,6 +1026,7 @@ void MenuBar::updateView() {
   mRefresh->setEnabled(view);
   mToggleLog->setEnabled(view);
   mToggleChat->setEnabled(view);
+  mToggleTerminal->setEnabled(view);
   mToggleView->setEnabled(view);
   mToggleMaximize->setEnabled(view);
 
