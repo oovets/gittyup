@@ -1065,9 +1065,51 @@ void CommitEditor::performFullReview(const QByteArray &diff) {
     }
     QString prompt = AiService::reviewPrompt(diff, {}, {}, context);
 
+    // Parse + cache the finished review (shared by both code paths).
+    auto store = [this, diff](const QString &text) {
+      KnowledgeBase *kb = KnowledgeBase::instance();
+      if (kb->isEnabled()) {
+        QList<KnowledgeBase::Finding> findings = FindingParser::parse(text);
+        kb->storeReview(diff, mRepo.workdir().path(), text, findings);
+      }
+    };
+
+    const bool stream =
+        Settings::instance()->value(Setting::Id::AiStreamReviews, true).toBool();
+
+    if (stream && dtw) {
+      auto acc = std::make_shared<QString>();
+      TaskDispatcher::TaskHandle handle =
+          TaskDispatcher::instance()->submitStreaming(
+              TaskDispatcher::TaskType::Review, prompt,
+              [dtw, acc](const QString &chunk) {
+                *acc += chunk;
+                dtw->streamReviewChunk(*acc);
+              },
+              [this, diff, dtw, store](const QString &full,
+                                       const QString &error) {
+                mReviewSpinner->stop();
+                if (full.isEmpty()) {
+                  // A clean cancel comes back with empty text and no error.
+                  dtw->showReview(error.isEmpty()
+                                      ? tr("_Review cancelled._")
+                                      : tr("**Review failed:** %1").arg(error),
+                                  diff);
+                  return;
+                }
+                dtw->showReview(full, diff);
+                store(full);
+              },
+              TaskDispatcher::Priority::Normal, AiService::ReviewMaxTokens);
+
+      dtw->beginStreamingReview(
+          [handle] { TaskDispatcher::instance()->cancel(handle); });
+      return;
+    }
+
     TaskDispatcher::instance()->submit(
         TaskDispatcher::TaskType::Review, prompt,
-        [this, diff, dtw](const TaskDispatcher::TaskResult &r) {
+        [this, diff, dtw, store](const TaskDispatcher::TaskResult &r) {
           mReviewSpinner->stop();
           if (!r.error.isEmpty()) {
             if (dtw)
@@ -1076,12 +1118,7 @@ void CommitEditor::performFullReview(const QByteArray &diff) {
           }
           if (dtw)
             dtw->showReview(r.text, diff);
-
-          KnowledgeBase *kb = KnowledgeBase::instance();
-          if (kb->isEnabled()) {
-            QList<KnowledgeBase::Finding> findings = FindingParser::parse(r.text);
-            kb->storeReview(diff, mRepo.workdir().path(), r.text, findings);
-          }
+          store(r.text);
         },
         TaskDispatcher::Priority::Normal, AiService::ReviewMaxTokens);
   };

@@ -16,6 +16,7 @@
 #include <QModelIndexList>
 #include <QSet>
 #include "conf/Settings.h"
+#include <functional>
 
 class QTreeView;
 class TreeView;
@@ -54,6 +55,13 @@ public:
   void showReview(const QString &text, const QByteArray &diff = {});
   void startReviewSpinner();
   void stopReviewSpinner();
+
+  // Streaming review: begin shows the Review pane with a Stop button wired to
+  // onCancel; streamReviewChunk renders the accumulated partial text; the final
+  // showReview() call finishes and hides the Stop button.
+  void beginStreamingReview(std::function<void()> onCancel);
+  void streamReviewChunk(const QString &partialText);
+
   void applyFixBlocks(const QString &aiResponse);
 
   uint32_t setDiffCounter() { return mSetDiffCounter; }
@@ -115,11 +123,13 @@ private:
 
   QTextBrowser *mReviewPanel{nullptr};
   QPushButton *mFixBtn{nullptr};
+  QPushButton *mStopReviewBtn{nullptr};
   QCheckBox *mHideFixedCb{nullptr};
   QWidget *mReviewContainer{nullptr};
   QString mLastReviewText;
   QByteArray mLastReviewDiff;
   QSet<QString> mFixedIssueKeys;
+  std::function<void()> mCancelReview;
 
   /*!
    * Shows BlameEditor, DiffView, or ReviewPanel

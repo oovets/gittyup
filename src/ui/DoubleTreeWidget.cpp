@@ -241,10 +241,19 @@ DoubleTreeWidget::DoubleTreeWidget(const git::Repository &repo, QWidget *parent)
     showReview(mLastReviewText, mLastReviewDiff);
   });
 
+  mStopReviewBtn = new QPushButton(tr("Stop"), mReviewContainer);
+  mStopReviewBtn->setMinimumHeight(32);
+  mStopReviewBtn->setVisible(false);
+  connect(mStopReviewBtn, &QPushButton::clicked, this, [this] {
+    if (mCancelReview)
+      mCancelReview();
+  });
+
   QHBoxLayout *reviewBtnRow = new QHBoxLayout;
   reviewBtnRow->setContentsMargins(0, 0, 0, 0);
   reviewBtnRow->addWidget(mHideFixedCb);
   reviewBtnRow->addStretch();
+  reviewBtnRow->addWidget(mStopReviewBtn);
   reviewBtnRow->addWidget(mFixBtn);
 
   reviewLayout->addWidget(mReviewPanel, 1);
@@ -1078,11 +1087,32 @@ void DoubleTreeWidget::showReview(const QString &text, const QByteArray &diff) {
   }
   mLastReviewText = text;
   mLastReviewDiff = diff;
+  mCancelReview = nullptr;
+  mStopReviewBtn->setVisible(false);
   bool hide = mHideFixedCb->isChecked();
   mReviewPanel->setHtml(formatReviewHtml(text, this, mFixedIssueKeys, hide));
   mFixBtn->setVisible(!diff.isEmpty() && !mFixedIssueKeys.contains("__all__"));
   mHideFixedCb->setVisible(!mFixedIssueKeys.isEmpty());
   mFileView->setCurrentIndex(Review);
+}
+
+void DoubleTreeWidget::beginStreamingReview(std::function<void()> onCancel) {
+  mCancelReview = std::move(onCancel);
+  mStopReviewBtn->setEnabled(true);
+  mStopReviewBtn->setVisible(true);
+  mFixBtn->setVisible(false);
+  mHideFixedCb->setVisible(false);
+  mReviewPanel->setHtml(formatReviewHtml(tr("Reviewing…"), this, mFixedIssueKeys,
+                                         false));
+  mFileView->setCurrentIndex(Review);
+}
+
+void DoubleTreeWidget::streamReviewChunk(const QString &partialText) {
+  mReviewPanel->setHtml(
+      formatReviewHtml(partialText, this, mFixedIssueKeys, false));
+  // Keep the newest content in view as it streams in.
+  mReviewPanel->verticalScrollBar()->setValue(
+      mReviewPanel->verticalScrollBar()->maximum());
 }
 
 void DoubleTreeWidget::applyFixBlocks(const QString &aiResponse) {
