@@ -78,6 +78,13 @@ public:
     AiEmbeddingModel,
     AiAutoAnalyzeEnabled,
     AiAutoAnalyzeInterval,
+    AiRequestTimeoutSeconds,
+    AiMaxRetries,
+    AiEmbeddingBatchEndpoint,
+    AiEmbeddingConcurrency,
+    AiReviewModel,
+    AiSchemaVersion,
+    AiStreamReviews,
   };
   Q_ENUM(Id)
 

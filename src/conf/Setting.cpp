@@ -55,6 +55,13 @@ void Setting::initialize(QMap<Id, QString> &keys) {
   keys[Id::AiEmbeddingModel] = "ai/embeddingModel";
   keys[Id::AiAutoAnalyzeEnabled] = "ai/autoAnalyze/enabled";
   keys[Id::AiAutoAnalyzeInterval] = "ai/autoAnalyze/intervalMinutes";
+  keys[Id::AiRequestTimeoutSeconds] = "ai/requestTimeoutSeconds";
+  keys[Id::AiMaxRetries] = "ai/maxRetries";
+  keys[Id::AiEmbeddingBatchEndpoint] = "ai/embeddingBatchEndpoint";
+  keys[Id::AiEmbeddingConcurrency] = "ai/embeddingConcurrency";
+  keys[Id::AiReviewModel] = "ai/reviewModel";
+  keys[Id::AiSchemaVersion] = "ai/schemaVersion";
+  keys[Id::AiStreamReviews] = "ai/streamReviews";
 }
 
 void Prompt::initialize(QMap<Kind, QString> &keys) {

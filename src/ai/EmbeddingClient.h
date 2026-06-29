@@ -24,6 +24,18 @@ public:
   void setModelName(const QString &name) { mModel = name; }
 
 private:
+  QString ollamaBase() const;
+
+  // Capped-concurrency fan-out of single /api/embeddings calls (the fallback
+  // path when the batched endpoint is unavailable or disabled).
+  void embedViaSingle(const QStringList &texts, int concurrency,
+                      BatchCallback callback);
+
+  // One /api/embed request per group of inputs (the fast path). Falls back to
+  // embedViaSingle if the server returns 404 or an unexpected response shape.
+  void embedViaBatchApi(const QStringList &texts, int batchSize,
+                        int concurrency, BatchCallback callback);
+
   QNetworkAccessManager mNet;
   QString mModel = QStringLiteral("nomic-embed-text");
 };

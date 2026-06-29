@@ -120,14 +120,18 @@ CodebaseIndex::collectSourceFiles(const QString &repoPath) const {
     if (!fi.exists() || fi.size() > kMaxFileSize)
       continue;
 
-    // Get file's blob SHA for change detection
-    QProcess shaProc;
-    shaProc.setWorkingDirectory(repoPath);
-    shaProc.start("git", {"hash-object", absPath});
+    // Content fingerprint for change detection. Hashing the file contents
+    // directly avoids spawning a `git hash-object` process per file (the
+    // dominant indexing cost) and has no side effects on the object database.
     QString sha;
-    if (shaProc.waitForFinished(3000) && shaProc.exitCode() == 0)
-      sha = QString::fromUtf8(shaProc.readAllStandardOutput()).trimmed();
-    else
+    QFile shaFile(absPath);
+    if (shaFile.open(QIODevice::ReadOnly)) {
+      QCryptographicHash hash(QCryptographicHash::Sha1);
+      if (hash.addData(&shaFile))
+        sha = QString::fromLatin1(hash.result().toHex());
+      shaFile.close();
+    }
+    if (sha.isEmpty())
       sha = QString::number(fi.lastModified().toSecsSinceEpoch());
 
     files.append({relPath, absPath, sha});
@@ -296,7 +300,10 @@ void CodebaseIndex::indexRepo(
   if (progress)
     progress(0, totalChunks);
 
-  // Process chunks sequentially in batches of 5
+  // Embed and store chunks one window at a time. Each window is sent through
+  // EmbeddingClient::embedBatch, which batches/parallelises the underlying
+  // requests, so this is dramatically faster than one request per chunk while
+  // still reporting incremental progress.
   struct IndexState {
     QList<ChunkWork> chunks;
     int current = 0;
@@ -320,10 +327,9 @@ void CodebaseIndex::indexRepo(
     model = QStringLiteral("nomic-embed-text");
   mEmbeddingClient->setModelName(model);
 
-  // Process one chunk at a time (shared_ptr so the recursive lambda captures
-  // a live reference instead of a still-empty std::function copy).
+  const int windowSize = 64;
   auto processNext = std::make_shared<std::function<void()>>();
-  *processNext = [this, state, processNext]() {
+  *processNext = [this, state, processNext, windowSize]() {
     if (state->current >= state->total) {
       mIndexing = false;
       emit indexingFinished(state->repoPath, state->total);
@@ -332,17 +338,34 @@ void CodebaseIndex::indexRepo(
       return;
     }
 
-    const auto &chunk = state->chunks[state->current];
-    mEmbeddingClient->embed(
-        chunk.content,
-        [this, state, chunk, processNext](QVector<float> emb,
-                                           const QString &err) {
-          if (err.isEmpty() && !emb.isEmpty()) {
+    const int start = state->current;
+    const int end = qMin(start + windowSize, state->total);
+    QStringList contents;
+    contents.reserve(end - start);
+    for (int i = start; i < end; ++i)
+      contents.append(state->chunks[i].content);
+
+    mEmbeddingClient->embedBatch(
+        contents, [this, state, processNext, start, end](
+                      QList<QVector<float>> embeddings, const QString &err) {
+          if (!err.isEmpty()) {
+            mIndexing = false;
+            emit indexingError(state->repoPath, err);
+            if (state->done)
+              state->done(err);
+            return;
+          }
+
+          for (int i = start; i < end; ++i) {
+            const QVector<float> &emb = embeddings.value(i - start);
+            if (emb.isEmpty())
+              continue;
+            const auto &chunk = state->chunks[i];
             storeChunk(chunk.repoPath, chunk.filePath, chunk.startLine,
                        chunk.endLine, chunk.content, emb, chunk.sha);
           }
 
-          state->current++;
+          state->current = end;
           if (state->progress)
             state->progress(state->current, state->total);
           emit indexingProgress(state->repoPath, state->current, state->total);

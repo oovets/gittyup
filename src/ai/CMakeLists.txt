@@ -10,6 +10,6 @@ add_library(
   RepoAnalyzer.cpp
   TaskDispatcher.cpp)
 
-target_link_libraries(ai conf Qt6::Core Qt6::Network Qt6::Sql)
+target_link_libraries(ai conf git Qt6::Core Qt6::Concurrent Qt6::Network Qt6::Sql)
 
 set_target_properties(ai PROPERTIES AUTOMOC ON)
