@@ -344,10 +344,31 @@ int Remote::Callbacks::credentials(git_credential **out, const char *url,
                        });
     }
 
+    // No host-specific key: build a candidate list — the configured fallback
+    // key (if any) first, then every default ~/.ssh/id_* key in preference
+    // order — and pick the first one that exists and hasn't been tried yet this
+    // session. libgit2 re-invokes this callback after each rejected key, so
+    // this works through all available keys (e.g. fall back from id_ed25519 to
+    // id_rsa) instead of giving up after the first one.
     if (key.isEmpty()) {
-      key = keyFile(cbs->keyFilePath());
-      if (cbs->mKeyFiles.contains(key))
-        key = "";
+      QStringList candidates;
+      const QString configured = cbs->keyFilePath();
+      if (!configured.isEmpty())
+        candidates << keyFile(configured);
+
+      QDir sshDir = QDir::home();
+      if (sshDir.cd(".ssh")) {
+        for (const QString &kind : kKeyKinds)
+          candidates << sshDir.absoluteFilePath(QString("id_%1").arg(kind));
+      }
+
+      for (const QString &candidate : candidates) {
+        if (!candidate.isEmpty() && QFile::exists(candidate) &&
+            !cbs->mKeyFiles.contains(candidate)) {
+          key = candidate;
+          break;
+        }
+      }
     }
 
     // Search for default keys.

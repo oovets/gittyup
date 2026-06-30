@@ -19,7 +19,9 @@
 #include <libssh2.h>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QEventLoop>
+#include <QFile>
 #include <QFormLayout>
 #include <QLineEdit>
 #include <QProcess>
@@ -259,7 +261,16 @@ QString RemoteCallbacks::keyFilePath() const {
 }
 
 QString RemoteCallbacks::configFilePath() const {
-  return Settings::instance()->value(Setting::Id::SshConfigFilePath).toString();
+  QString path =
+      Settings::instance()->value(Setting::Id::SshConfigFilePath).toString();
+  // Fall back to the user's ~/.ssh/config so per-host `IdentityFile` entries are
+  // honoured even when no explicit path is configured.
+  if (path.isEmpty()) {
+    const QString def = QDir::home().absoluteFilePath(".ssh/config");
+    if (QFile::exists(def))
+      path = def;
+  }
+  return path;
 }
 
 bool RemoteCallbacks::connectToAgent() const {
