@@ -84,6 +84,11 @@ Performance, robustness and quality work across the AI subsystem:
 
 - Interactive chat sidebar docked in the repo view. Toggle with
   `Ctrl+Shift+C`, the **Chat** button, or the View menu.
+- Replies render as **formatted markdown live** while they stream (headings,
+  bold/italic, bullet lists, inline code and code blocks) instead of showing raw
+  markdown.
+- Accepts context attached from elsewhere (the current diff/file, or terminal
+  output via the terminal's "Send selection to Chat").
 
 ### Knowledge Base
 
@@ -163,6 +168,17 @@ Performance, robustness and quality work across the AI subsystem:
   single-key shortcuts (e.g. the diff view's `d`/`w`) no longer steal keystrokes
   while the terminal has focus (handled via `ShortcutOverride`). Command-key
   shortcuts still reach the app.
+- **Selection, copy & paste** — drag to select (highlighted); copy/paste via the
+  right-click menu or `Cmd+C`/`Cmd+V`. Copy only intercepts the shortcut when
+  something is selected, so `Ctrl+C` still interrupts the shell. On macOS the
+  physical Control key maps to the terminal's Ctrl, while Command is reserved for
+  clipboard/app shortcuts.
+- **Clickable URLs** — `Cmd`/`Ctrl`+click opens the URL under the cursor (also
+  available as "Open link" in the context menu); detects `http(s)://`, `file://`
+  and `www.`.
+- **Send selection to Chat** — right-click a selection and "Send selection to
+  Chat" attaches the terminal output as context and reveals the chat panel, so
+  you can ask the AI about an error or command output directly.
 - Toggle from **View → Show Terminal** (Ctrl + `` ` ``), as a tab in the bottom
   panel alongside Log and Chat.
 

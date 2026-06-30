@@ -53,8 +53,10 @@ status bar. See the [CHANGELOG](CHANGELOG.md#ai-engine-improvements) for details
 
 A built-in terminal emulator powered by [libvterm](https://www.leonerd.org.uk/code/libvterm/)
 (MIT) with a custom Qt renderer — 256-color/true-color, full ANSI rendering,
-scrollback, working tab-completion, and resize handling. Toggle it from
-**View → Show Terminal** (Ctrl + `` ` ``).
+scrollback, working tab-completion, and resize handling. Select to highlight,
+copy/paste (`Cmd+C`/`Cmd+V` or the right-click menu), `Cmd`/`Ctrl`+click to open
+URLs, and **"Send selection to Chat"** to ask the AI about terminal output.
+Toggle it from **View → Show Terminal** (Ctrl + `` ` ``).
 
 **Merged sidebar & status bar**
 
