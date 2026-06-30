@@ -96,9 +96,27 @@ void ChatPanel::setDiffContext(const QString &diff) { mDiffContext = diff; }
 
 void ChatPanel::setFileContext(const QString &file) { mFileContext = file; }
 
+void ChatPanel::addTerminalContext(const QString &text) {
+  mTerminalContext = text;
+  // Surface what was attached so the user sees it took effect, then focus the
+  // input ready for their question about it.
+  if (!text.isEmpty()) {
+    const QString preview =
+        text.length() > 400 ? text.left(400) + QStringLiteral("…") : text;
+    mChatView->append(
+        QStringLiteral(
+            "<i style='color:#888;'>Added terminal output as context:</i>"
+            "<pre style='color:#aaa;'>%1</pre>")
+            .arg(preview.toHtmlEscaped()));
+    scrollToBottom();
+  }
+  mInput->setFocus();
+}
+
 void ChatPanel::clearContext() {
   mDiffContext.clear();
   mFileContext.clear();
+  mTerminalContext.clear();
 }
 
 void ChatPanel::clearChat() {
@@ -123,6 +141,12 @@ QString ChatPanel::buildSystemPrompt() const {
   if (!mFileContext.isEmpty()) {
     prompt += QStringLiteral("\n\nThe user is currently viewing this file: ") +
               mFileContext;
+  }
+
+  if (!mTerminalContext.isEmpty()) {
+    prompt += QStringLiteral(
+        "\n\nThe user sent this output from the terminal for context:\n");
+    prompt += mTerminalContext.left(8000);
   }
 
   return prompt;
@@ -199,27 +223,43 @@ QString ChatPanel::markdownToHtml(const QString &md) {
       continue;
     }
 
-    QString processed = line;
+    // Apply inline replacements (code, bold, italic) on top of escaped text.
+    auto applyInline = [](QString s) {
+      s = s.toHtmlEscaped();
+      static QRegularExpression codeRe("`([^`]+)`");
+      s.replace(codeRe, "<code>\\1</code>");
+      static QRegularExpression boldRe("\\*\\*([^*]+)\\*\\*");
+      s.replace(boldRe, "<b>\\1</b>");
+      static QRegularExpression italicRe("(?<![\\w*])\\*([^*\\n]+)\\*(?!\\w)");
+      s.replace(italicRe, "<i>\\1</i>");
+      return s;
+    };
 
-    if (processed.startsWith("### "))
-      { result += "<b>" + processed.mid(4).toHtmlEscaped() + "</b><br>"; continue; }
-    if (processed.startsWith("## "))
-      { result += "<b>" + processed.mid(3).toHtmlEscaped() + "</b><br>"; continue; }
-    if (processed.startsWith("# "))
-      { result += "<b>" + processed.mid(2).toHtmlEscaped() + "</b><br>"; continue; }
+    // Headings: strip the leading # markers, then run inline replacements on
+    // the rest so `### **Foo**` becomes a bold-and-strong heading rather than
+    // showing the literal asterisks.
+    if (line.startsWith("#### "))
+      { result += "<b>" + applyInline(line.mid(5)) + "</b><br>"; continue; }
+    if (line.startsWith("### "))
+      { result += "<b>" + applyInline(line.mid(4)) + "</b><br>"; continue; }
+    if (line.startsWith("## "))
+      { result += "<b>" + applyInline(line.mid(3)) + "</b><br>"; continue; }
+    if (line.startsWith("# "))
+      { result += "<b>" + applyInline(line.mid(2)) + "</b><br>"; continue; }
 
-    processed = processed.toHtmlEscaped();
+    // Bullet list items (allow leading whitespace for nested lists).
+    QString stripped = line;
+    int indent = 0;
+    while (indent < stripped.size() && stripped[indent] == ' ')
+      ++indent;
+    QString rest = stripped.mid(indent);
+    if (rest.startsWith("- ") || rest.startsWith("* ")) {
+      QString prefix = QString("&nbsp;").repeated(indent * 2);
+      result += prefix + " &bull; " + applyInline(rest.mid(2)) + "<br>";
+      continue;
+    }
 
-    static QRegularExpression codeRe("`([^`]+)`");
-    processed.replace(codeRe, "<code>\\1</code>");
-    static QRegularExpression boldRe("\\*\\*([^*]+)\\*\\*");
-    processed.replace(boldRe, "<b>\\1</b>");
-    static QRegularExpression italicRe("\\*([^*]+)\\*");
-    processed.replace(italicRe, "<i>\\1</i>");
-
-    if (processed.startsWith("- ") || processed.startsWith("* "))
-      { result += " &bull; " + processed.mid(2) + "<br>"; continue; }
-
+    QString processed = applyInline(line);
     if (processed.trimmed().isEmpty())
       result += "<br>";
     else
@@ -245,17 +285,18 @@ void ChatPanel::appendMessage(const QString &role, const QString &text) {
 }
 
 void ChatPanel::renderFormattedResponse() {
-  QTextDocument *doc = mChatView->document();
-  QTextCursor findCursor =
-      doc->find("AI:", QTextCursor(), QTextDocument::FindBackward);
-  if (findCursor.isNull())
+  if (mAiBlockStart < 0)
     return;
 
-  findCursor.movePosition(QTextCursor::StartOfBlock);
-  findCursor.movePosition(QTextCursor::End, QTextCursor::KeepAnchor);
-  findCursor.removeSelectedText();
-  findCursor.insertHtml("<b style='color:#81c784;'>AI:</b><br>" +
-                         markdownToHtml(mStreamBuffer));
+  // Select from the recorded start of the AI reply to the end of the document
+  // and replace the streamed plain text with the rendered HTML. Using the
+  // explicit position is bulletproof — searching for "AI:" backward was
+  // unreliable (depending on Qt version it could return a null cursor).
+  QTextCursor cursor(mChatView->document());
+  cursor.setPosition(mAiBlockStart);
+  cursor.movePosition(QTextCursor::End, QTextCursor::KeepAnchor);
+  cursor.removeSelectedText();
+  cursor.insertHtml(markdownToHtml(mStreamBuffer));
 }
 
 void ChatPanel::scrollToBottom() {
@@ -286,8 +327,15 @@ void ChatPanel::sendMessage() {
   mStatusLabel->setText(tr("Thinking…"));
   mSendBtn->setEnabled(false);
 
-  // Start the AI response block in the chat view.
+  // Start the AI response block in the chat view, and remember the position
+  // right after the "AI:" label so we can replace the streamed plain text with
+  // rendered HTML when the response finishes.
   mChatView->append("<b>AI:</b> ");
+  {
+    QTextCursor end(mChatView->document());
+    end.movePosition(QTextCursor::End);
+    mAiBlockStart = end.position();
+  }
 
   // Route through the dispatcher so chat shares timeouts, retry, cancellation
   // and stats with the rest of the AI features. The dispatcher parses the
@@ -298,9 +346,10 @@ void ChatPanel::sendMessage() {
         if (chunk.isEmpty())
           return;
         mStreamBuffer += chunk;
-        QTextCursor cursor = mChatView->textCursor();
-        cursor.movePosition(QTextCursor::End);
-        cursor.insertText(chunk);
+        // Re-render the whole reply as formatted HTML from the accumulated
+        // buffer on each chunk, so markdown shows formatted live (and the final
+        // state is always correct).
+        renderFormattedResponse();
         scrollToBottom();
       },
       [this](const QString &full, const QString &error) {
@@ -316,6 +365,7 @@ void ChatPanel::sendMessage() {
             mHistory.append({"assistant", mStreamBuffer});
             renderFormattedResponse();
           }
+          mAiBlockStart = -1;
           mChatView->append("");
           mStatusLabel->setText(tr("Ready"));
         }

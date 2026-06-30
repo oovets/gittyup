@@ -436,6 +436,16 @@ RepoView::RepoView(const git::Repository &repo, MainWindow *parent)
   mTerminal = new TerminalView(this);
   mTerminal->setWorkingDirectory(mRepo.workdir().path());
 
+  // "Send selection to Chat" from the terminal: attach it as chat context and
+  // bring the chat panel forward.
+  connect(mTerminal, &TerminalView::sendToChatRequested, this,
+          [this](const QString &text) {
+            if (text.isEmpty())
+              return;
+            setChatVisible(true);
+            mChatPanel->addTerminalContext(text);
+          });
+
   mBottomTabs = new QTabWidget(this);
   mBottomTabs->setTabPosition(QTabWidget::South);
   mBottomTabs->addTab(mLogView, tr("Log"));

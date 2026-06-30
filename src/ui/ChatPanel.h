@@ -19,6 +19,7 @@ public:
 
   void setDiffContext(const QString &diff);
   void setFileContext(const QString &file);
+  void addTerminalContext(const QString &text);
   void clearContext();
   void clearChat();
 
@@ -53,9 +54,11 @@ private:
 
   QList<Message> mHistory;
   QString mStreamBuffer;
+  int mAiBlockStart = -1; // character position where the current AI reply began
 
   QString mDiffContext;
   QString mFileContext;
+  QString mTerminalContext;
 };
 
 #endif // CHATPANEL_H

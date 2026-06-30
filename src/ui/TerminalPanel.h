@@ -2,6 +2,7 @@
 #define TERMINALPANEL_UI_H
 
 #include <QAbstractScrollArea>
+#include <QPoint>
 #include <QTimer>
 #include <QWidget>
 #include <vector>
@@ -20,6 +21,10 @@ public:
   void setWorkingDirectory(const QString &dir);
   QSize sizeHint() const override;
 
+signals:
+  // Emitted when the user picks "Send selection to Chat" from the context menu.
+  void sendToChatRequested(const QString &text);
+
 protected:
   bool event(QEvent *event) override;
   void paintEvent(QPaintEvent *event) override;
@@ -30,6 +35,9 @@ protected:
   void focusInEvent(QFocusEvent *event) override;
   void focusOutEvent(QFocusEvent *event) override;
   void mousePressEvent(QMouseEvent *event) override;
+  void mouseMoveEvent(QMouseEvent *event) override;
+  void mouseReleaseEvent(QMouseEvent *event) override;
+  void contextMenuEvent(QContextMenuEvent *event) override;
   bool focusNextPrevChild(bool next) override;
 
 private slots:
@@ -56,6 +64,18 @@ private:
   QColor vtermColorToQt(const VTermScreenCell &cell, bool foreground) const;
   void flushDamage();
 
+  // Selection / clipboard / links.
+  bool cellAt(int row, int col, VTermScreenCell &out) const;
+  QPoint cellForPos(const QPoint &pos) const;
+  QString lineText(int row) const;
+  QString urlAt(int row, int col) const;
+  bool hasSelection() const;
+  QString selectedText() const;
+  void copySelection();
+  void pasteClipboard();
+  void selectAll();
+  void clearSelection();
+
   VTerm *mVt = nullptr;
   VTermScreen *mVtScreen = nullptr;
 
@@ -81,6 +101,12 @@ private:
   std::vector<ScrollbackLine> mScrollback;
   int mScrollbackMax = 5000;
   int mScrollOffset = 0;
+
+  // Selection (viewport cell coordinates: x = col, y = row).
+  QPoint mSelAnchor{-1, -1};
+  QPoint mSelHead{-1, -1};
+  bool mSelecting = false;
+  bool mHasSelection = false;
 
   // Damage tracking
   bool mDamageAll = false;

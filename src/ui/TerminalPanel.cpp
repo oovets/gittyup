@@ -1,14 +1,21 @@
 #include "TerminalPanel.h"
 
 #include <QApplication>
+#include <QClipboard>
+#include <QContextMenuEvent>
+#include <QDesktopServices>
 #include <QFont>
 #include <QFontMetricsF>
 #include <QInputMethodEvent>
 #include <QKeyEvent>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QRegularExpression>
 #include <QScrollBar>
 #include <QSocketNotifier>
+#include <QStringList>
+#include <QUrl>
 
 #include <cerrno>
 #include <csignal>
@@ -23,6 +30,16 @@
 
 // Trampoline wrappers matching VTermScreenCallbacks signatures
 namespace {
+
+// Decode a screen cell's codepoints into a QString (empty for a blank cell).
+QString cellChars(const VTermScreenCell &cell) {
+  if (cell.chars[0] == 0)
+    return QString();
+  QString s = QString::fromUcs4(cell.chars, 1);
+  for (int i = 1; i < VTERM_MAX_CHARS_PER_CELL && cell.chars[i]; ++i)
+    s += QString::fromUcs4(&cell.chars[i], 1);
+  return s;
+}
 
 int cb_damage(VTermRect rect, void *user) {
   return TerminalView::onDamage(rect.start_row, rect.end_row, rect.start_col,
@@ -264,6 +281,12 @@ void TerminalView::paintEvent(QPaintEvent *) {
   QColor defaultBg(0x1e, 0x1e, 0x1e);
   p.fillRect(viewport()->rect(), defaultBg);
 
+  // Selection bounds in reading order.
+  QPoint selA = mSelAnchor, selB = mSelHead;
+  if (selA.y() > selB.y() || (selA.y() == selB.y() && selA.x() > selB.x()))
+    std::swap(selA, selB);
+  const QColor selectionBg(0x33, 0x4e, 0x73);
+
   for (int row = 0; row < mRows; ++row) {
     int screenRow = row;
     bool fromScrollback = false;
@@ -323,6 +346,14 @@ void TerminalView::paintEvent(QPaintEvent *) {
 
       if (bg != defaultBg)
         p.fillRect(x, y, cellWidth * mCellW, mCellH, bg);
+
+      // Selection highlight.
+      const bool selected =
+          mHasSelection &&
+          (row > selA.y() || (row == selA.y() && col >= selA.x())) &&
+          (row < selB.y() || (row == selB.y() && col <= selB.x()));
+      if (selected)
+        p.fillRect(x, y, cellWidth * mCellW, mCellH, selectionBg);
 
       // Cursor
       bool isCursor = (!fromScrollback && mScrollOffset == 0 &&
@@ -397,10 +428,12 @@ bool TerminalView::event(QEvent *event) {
   // focus and would steal those keystrokes from the shell. Accepting the
   // ShortcutOverride tells Qt to deliver the key as a normal keyPressEvent
   // to us instead. We let Command-key combos through so macOS app/system
-  // shortcuts (copy, paste, quit, toggle terminal) keep working.
+  // shortcuts (quit, toggle terminal) keep working — except Copy/Paste, which
+  // the terminal handles itself so they reach the shell selection/clipboard.
   if (event->type() == QEvent::ShortcutOverride) {
     auto *ke = static_cast<QKeyEvent *>(event);
-    if (!(ke->modifiers() & Qt::ControlModifier)) {
+    if (!(ke->modifiers() & Qt::ControlModifier) ||
+        ke->matches(QKeySequence::Copy) || ke->matches(QKeySequence::Paste)) {
       event->accept();
       return true;
     }
@@ -421,7 +454,20 @@ bool TerminalView::event(QEvent *event) {
 }
 
 void TerminalView::keyPressEvent(QKeyEvent *event) {
-  // Reset scroll to bottom on keypress
+  // Clipboard shortcuts (Cmd+C / Cmd+V on macOS, Ctrl+C / Ctrl+V elsewhere).
+  // Copy is only intercepted when something is selected, so Ctrl+C still sends
+  // an interrupt to the shell when there is no selection.
+  if (event->matches(QKeySequence::Copy) && hasSelection()) {
+    copySelection();
+    return;
+  }
+  if (event->matches(QKeySequence::Paste)) {
+    pasteClipboard();
+    return;
+  }
+
+  // Any other key press dismisses the selection and returns to the bottom.
+  clearSelection();
   if (mScrollOffset > 0) {
     mScrollOffset = 0;
     updateScrollbar();
@@ -431,10 +477,25 @@ void TerminalView::keyPressEvent(QKeyEvent *event) {
   Qt::KeyboardModifiers qmod = event->modifiers();
   if (qmod & Qt::ShiftModifier)
     mod = static_cast<VTermModifier>(mod | VTERM_MOD_SHIFT);
-  if (qmod & Qt::ControlModifier)
-    mod = static_cast<VTermModifier>(mod | VTERM_MOD_CTRL);
   if (qmod & Qt::AltModifier)
     mod = static_cast<VTermModifier>(mod | VTERM_MOD_ALT);
+#ifdef Q_OS_MACOS
+  // On macOS the physical Control key is Qt::MetaModifier; Qt::ControlModifier
+  // is Command, reserved for app/clipboard shortcuts.
+  if (qmod & Qt::MetaModifier)
+    mod = static_cast<VTermModifier>(mod | VTERM_MOD_CTRL);
+#else
+  if (qmod & Qt::ControlModifier)
+    mod = static_cast<VTermModifier>(mod | VTERM_MOD_CTRL);
+#endif
+
+  // Control + a letter (Ctrl+C interrupt, Ctrl+D EOF, Ctrl+Z, …): send the
+  // control character explicitly, since event->text() may be empty for these.
+  if ((mod & VTERM_MOD_CTRL) && event->key() >= Qt::Key_A &&
+      event->key() <= Qt::Key_Z) {
+    vterm_keyboard_unichar(mVt, 'a' + (event->key() - Qt::Key_A), mod);
+    return;
+  }
 
   VTermKey vtkey = VTERM_KEY_NONE;
   switch (event->key()) {
@@ -592,9 +653,222 @@ void TerminalView::focusOutEvent(QFocusEvent *event) {
   viewport()->update();
 }
 
+// Read the cell at a viewport (row, col), mirroring paintEvent's scrollback /
+// screen mapping. Returns false for out-of-range coordinates.
+bool TerminalView::cellAt(int row, int col, VTermScreenCell &out) const {
+  memset(&out, 0, sizeof(out));
+  if (row < 0 || row >= mRows || col < 0 || col >= mCols)
+    return false;
+
+  int screenRow = row;
+  bool fromScrollback = false;
+  int sbIdx = -1;
+  if (mScrollOffset > 0) {
+    const int sbSize = static_cast<int>(mScrollback.size());
+    const int sbRow = row - (mRows - mScrollOffset);
+    if (sbRow < 0) {
+      sbIdx = sbSize - mScrollOffset + row;
+      if (sbIdx < 0 || sbIdx >= sbSize)
+        return false;
+      fromScrollback = true;
+    } else {
+      screenRow = sbRow;
+    }
+  }
+
+  if (fromScrollback) {
+    const auto &line = mScrollback[sbIdx];
+    if (col < static_cast<int>(line.cells.size()))
+      out = line.cells[col];
+    else {
+      out.chars[0] = ' ';
+      out.width = 1;
+    }
+  } else {
+    VTermPos pos = {screenRow, col};
+    vterm_screen_get_cell(mVtScreen, pos, &out);
+  }
+  return true;
+}
+
+QPoint TerminalView::cellForPos(const QPoint &pos) const {
+  int col = mCellW > 0 ? pos.x() / mCellW : 0;
+  int row = mCellH > 0 ? pos.y() / mCellH : 0;
+  col = qBound(0, col, mCols - 1);
+  row = qBound(0, row, mRows - 1);
+  return QPoint(col, row);
+}
+
+QString TerminalView::lineText(int row) const {
+  QString s;
+  for (int col = 0; col < mCols; ++col) {
+    VTermScreenCell cell;
+    cellAt(row, col, cell);
+    const QString ch = cellChars(cell);
+    s += ch.isEmpty() ? QStringLiteral(" ") : ch;
+  }
+  return s;
+}
+
+QString TerminalView::urlAt(int row, int col) const {
+  const QString line = lineText(row);
+  static const QRegularExpression re(
+      QStringLiteral(R"((?:https?://|file://|www\.)[^\s"'<>`\]]+)"));
+  auto it = re.globalMatch(line);
+  while (it.hasNext()) {
+    const QRegularExpressionMatch m = it.next();
+    if (col >= m.capturedStart() && col < m.capturedEnd()) {
+      QString u = m.captured();
+      while (u.endsWith('.') || u.endsWith(',') || u.endsWith(')') ||
+             u.endsWith(';'))
+        u.chop(1);
+      if (u.startsWith(QStringLiteral("www.")))
+        u.prepend(QStringLiteral("https://"));
+      return u;
+    }
+  }
+  return QString();
+}
+
+bool TerminalView::hasSelection() const {
+  return mHasSelection && mSelAnchor.x() >= 0 && mSelHead.x() >= 0;
+}
+
+QString TerminalView::selectedText() const {
+  if (!hasSelection())
+    return QString();
+
+  QPoint a = mSelAnchor, b = mSelHead;
+  if (a.y() > b.y() || (a.y() == b.y() && a.x() > b.x()))
+    std::swap(a, b);
+
+  QStringList lines;
+  for (int row = a.y(); row <= b.y(); ++row) {
+    const int c0 = (row == a.y()) ? a.x() : 0;
+    const int c1 = (row == b.y()) ? b.x() : mCols - 1;
+    QString line;
+    for (int col = c0; col <= c1 && col < mCols; ++col) {
+      VTermScreenCell cell;
+      cellAt(row, col, cell);
+      line += cellChars(cell);
+    }
+    while (line.endsWith(' '))
+      line.chop(1);
+    lines << line;
+  }
+  return lines.join('\n');
+}
+
+void TerminalView::copySelection() {
+  const QString text = selectedText();
+  if (!text.isEmpty())
+    QApplication::clipboard()->setText(text);
+}
+
+void TerminalView::pasteClipboard() {
+  const QString text = QApplication::clipboard()->text();
+  if (text.isEmpty())
+    return;
+  if (mScrollOffset > 0) {
+    mScrollOffset = 0;
+    updateScrollbar();
+  }
+  // Normalise newlines to carriage returns the way a terminal expects.
+  QString s = text;
+  s.replace(QStringLiteral("\r\n"), QStringLiteral("\r"));
+  s.replace('\n', '\r');
+  writeToShell(s.toUtf8());
+}
+
+void TerminalView::selectAll() {
+  mSelAnchor = QPoint(0, 0);
+  mSelHead = QPoint(mCols - 1, mRows - 1);
+  mHasSelection = true;
+  viewport()->update();
+}
+
+void TerminalView::clearSelection() {
+  if (mHasSelection || mSelAnchor.x() >= 0) {
+    mHasSelection = false;
+    mSelAnchor = mSelHead = QPoint(-1, -1);
+    viewport()->update();
+  }
+}
+
 void TerminalView::mousePressEvent(QMouseEvent *event) {
   setFocus();
+  if (event->button() == Qt::LeftButton) {
+    const QPoint cell = cellForPos(event->pos());
+    // Cmd/Ctrl+click opens a URL under the cursor instead of selecting.
+    if (event->modifiers() & Qt::ControlModifier) {
+      const QString url = urlAt(cell.y(), cell.x());
+      if (!url.isEmpty()) {
+        QDesktopServices::openUrl(QUrl(url));
+        return;
+      }
+    }
+    clearSelection();
+    mSelAnchor = mSelHead = cell;
+    mSelecting = true;
+    mHasSelection = false;
+  }
   QAbstractScrollArea::mousePressEvent(event);
+}
+
+void TerminalView::mouseMoveEvent(QMouseEvent *event) {
+  if (mSelecting) {
+    const QPoint cell = cellForPos(event->pos());
+    if (cell != mSelHead) {
+      mSelHead = cell;
+      if (mSelHead != mSelAnchor)
+        mHasSelection = true;
+      viewport()->update();
+    }
+  }
+  QAbstractScrollArea::mouseMoveEvent(event);
+}
+
+void TerminalView::mouseReleaseEvent(QMouseEvent *event) {
+  mSelecting = false;
+  QAbstractScrollArea::mouseReleaseEvent(event);
+}
+
+void TerminalView::contextMenuEvent(QContextMenuEvent *event) {
+  const QPoint cell = cellForPos(event->pos());
+  const QString url = urlAt(cell.y(), cell.x());
+
+  QMenu menu(this);
+  QAction *copyAct = menu.addAction(tr("Copy"));
+  copyAct->setEnabled(hasSelection());
+  QAction *pasteAct = menu.addAction(tr("Paste"));
+  pasteAct->setEnabled(!QApplication::clipboard()->text().isEmpty());
+
+  menu.addSeparator();
+  QAction *chatAct = menu.addAction(tr("Send selection to Chat"));
+  chatAct->setEnabled(hasSelection());
+
+  QAction *linkAct = nullptr;
+  if (!url.isEmpty()) {
+    menu.addSeparator();
+    linkAct = menu.addAction(tr("Open link"));
+  }
+
+  menu.addSeparator();
+  QAction *selectAllAct = menu.addAction(tr("Select All"));
+
+  QAction *chosen = menu.exec(event->globalPos());
+  if (!chosen)
+    return;
+  if (chosen == copyAct)
+    copySelection();
+  else if (chosen == pasteAct)
+    pasteClipboard();
+  else if (chosen == chatAct)
+    emit sendToChatRequested(selectedText());
+  else if (linkAct && chosen == linkAct)
+    QDesktopServices::openUrl(QUrl(url));
+  else if (chosen == selectAllAct)
+    selectAll();
 }
 
 bool TerminalView::focusNextPrevChild(bool) {
