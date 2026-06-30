@@ -20,8 +20,6 @@ retry with backoff, cancellation, bounded queue), **smarter** (full changed-file
 review context, normalized embeddings, indexed similarity), and added **streaming
 code reviews with a Stop button**, with chat unified onto the same task pipeline.
 
-![Overview](rsrc/screenshots/ai_overview.png)
-
 Unreleased
 ----------
 
@@ -168,8 +166,6 @@ Performance, robustness and quality work across the AI subsystem:
 - Toggle from **View → Show Terminal** (Ctrl + `` ` ``), as a tab in the bottom
   panel alongside Log and Chat.
 
-![Integrated terminal](rsrc/screenshots/ai_terminal.png)
-
 ### Merged Repo / Changes Sidebar
 
 - The separate **CHANGES** section was merged into **OPEN**: each open
@@ -179,8 +175,6 @@ Performance, robustness and quality work across the AI subsystem:
 - Repositories with changes auto-expand; expansion state is restored across
   sessions.
 - SSH repositories are shown with a distinct terminal-style icon.
-
-<img src="rsrc/screenshots/ai_sidebar.png" alt="Merged sidebar" width="240"/>
 
 ### Status Bar
 
