@@ -29,10 +29,12 @@ real integrated terminal and several UI improvements. See the
 
 **AI assistant**
 
-- **Code review** — review staged/unstaged diffs or any commit. Findings show
-  severity (CRITICAL / HIGH / MEDIUM / LOW), file/line references, and suggested
-  fixes. A 3-step cache (exact diff hash → semantic embedding similarity → full
-  LLM call) avoids redundant requests.
+- **Code review** — review staged/unstaged diffs or any commit. Findings
+  **stream in progressively** with a Stop button and show severity
+  (CRITICAL / HIGH / MEDIUM / LOW), file/line references, and suggested fixes. A
+  3-step cache (exact diff hash → semantic embedding similarity → full LLM call)
+  avoids redundant requests, and the full content of changed files is included
+  as context for fewer false positives.
 - **Commit message generation** from the current diff (conventional commits).
 - **Per-hunk explanations** rendered inline in the diff view.
 - **Chat panel** docked in the repo view (`Ctrl+Shift+C`).
@@ -40,6 +42,12 @@ real integrated terminal and several UI improvements. See the
   fix recipes stored locally in SQLite; the most relevant code chunks are
   injected as context for deeper reviews.
 - **Background analysis** of recently-opened repositories on HEAD changes.
+
+The AI engine is built for local/LAN Ollama: **batched embeddings**, parallel
+indexing, request **timeouts**, **retry with backoff**, **cancellation**, and a
+**task dispatcher** that all AI work (reviews, chat, embeddings, commit
+messages) flows through — with live model/queue/token/cache status in the
+status bar. See the [CHANGELOG](CHANGELOG.md#ai-engine-improvements) for details.
 
 **Integrated terminal**
 

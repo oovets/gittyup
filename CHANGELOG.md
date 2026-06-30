@@ -14,10 +14,51 @@ It also ships a built-in **terminal emulator** (libvterm + custom Qt renderer),
 a **merged repo/changes sidebar**, a live **status bar**, a model-routing **task
 dispatcher**, and a bundled **Claude Code** theme.
 
+A follow-up pass (the "AI engine" waves below) made the assistant **faster**
+(batched embeddings, parallel indexing), **more robust** (request timeouts,
+retry with backoff, cancellation, bounded queue), **smarter** (full changed-file
+review context, normalized embeddings, indexed similarity), and added **streaming
+code reviews with a Stop button**, with chat unified onto the same task pipeline.
+
 ![Overview](rsrc/screenshots/ai_overview.png)
 
 Unreleased
 ----------
+
+### AI Engine Improvements
+
+Performance, robustness and quality work across the AI subsystem:
+
+- **Faster embeddings** — `EmbeddingClient` batches inputs through Ollama's
+  `/api/embed` endpoint (one request per group, capped concurrency) instead of
+  one HTTP request per item, with a transparent fallback to `/api/embeddings`.
+- **Faster indexing** — `CodebaseIndex` hashes file contents directly instead of
+  spawning a `git hash-object` process per file, and embeds chunks in batched
+  windows.
+- **Request timeouts** everywhere (`AiRequestTimeoutSeconds`, default 300s) so a
+  stalled server can no longer hang a request forever.
+- **Cancellation** — `TaskDispatcher` hands out task handles; `cancel()` aborts a
+  queued or in-flight request. Timeouts and user-cancels are distinguished so a
+  cancel isn't counted as a failure.
+- **Retry with backoff** on transient failures (timeout, connection refused,
+  5xx, 429), up to `AiMaxRetries`. **Bounded queue** rejects work past a cap
+  instead of growing unbounded.
+- **Streaming code reviews** — reviews render progressively with a **Stop**
+  button (gated by `AiStreamReviews`); a cancel shows "Review cancelled."
+- **Smarter review context** — the full working-tree content of changed files is
+  attached to the review prompt (budgeted), removing a class of false positives
+  where issues were already handled just outside the hunk. RAG retrieval now
+  queries on the changed hunks rather than the raw diff prefix.
+- **Embedding correctness** — vectors are normalized at write time and the
+  knowledge base / codebase index gained `embedding_model` indexes for faster
+  per-model similarity search.
+- **Live cache stats** — knowledge-base cache hits show as "⚡ N cached" in the
+  status bar.
+- **Git off the UI thread** — `RepoAnalyzer` and the chat repo-context builder
+  use libgit2 instead of synchronous `git` subprocesses that blocked the UI.
+- **Unified chat** — `ChatPanel` sends through `TaskDispatcher` (multi-turn
+  message array), inheriting shared timeouts/retry/cancellation/stats and
+  dropping its duplicated stream-parsing code.
 
 ### AI Code Review
 
