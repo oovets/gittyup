@@ -101,6 +101,28 @@ TaskDispatcher::submitStreaming(TaskType type, const QString &prompt,
   return handle;
 }
 
+TaskDispatcher::TaskHandle
+TaskDispatcher::submitStreamingChat(const QJsonArray &messages,
+                                    const QString &system,
+                                    StreamCallback onChunk,
+                                    StreamDoneCallback onDone, Priority priority,
+                                    int maxTokens) {
+  Task task;
+  task.id = mNextHandle++;
+  task.type = TaskType::Chat;
+  task.priority = priority;
+  task.system = system;
+  task.messages = messages;
+  task.maxTokens = maxTokens;
+  task.streaming = true;
+  task.streamChunk = onChunk;
+  task.streamDone = onDone;
+
+  TaskHandle handle = enqueue(task);
+  processQueue();
+  return handle;
+}
+
 void TaskDispatcher::cancel(TaskHandle handle) {
   if (handle == 0)
     return;
@@ -372,13 +394,27 @@ void TaskDispatcher::executeStreamTask(Task &task) {
   QNetworkRequest request;
   QJsonObject body;
 
+  // A multi-turn chat task carries its own message array; a plain task is a
+  // single user turn built from the prompt.
+  const bool multiTurn = !task.messages.isEmpty();
+
   if (cfg.provider == QStringLiteral("ollama")) {
     request.setUrl(QUrl(baseUrl + "/api/chat"));
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     body["model"] = route.model;
     body["stream"] = true;
-    body["messages"] =
-        QJsonArray{QJsonObject{{"role", "user"}, {"content", task.prompt}}};
+    if (multiTurn) {
+      QJsonArray messages;
+      if (!task.system.isEmpty())
+        messages.append(
+            QJsonObject{{"role", "system"}, {"content", task.system}});
+      for (const QJsonValue &m : task.messages)
+        messages.append(m);
+      body["messages"] = messages;
+    } else {
+      body["messages"] =
+          QJsonArray{QJsonObject{{"role", "user"}, {"content", task.prompt}}};
+    }
   } else {
     if (cfg.apiKey.isEmpty()) {
       mActiveCount[task.type]--;
@@ -398,8 +434,14 @@ void TaskDispatcher::executeStreamTask(Task &task) {
     body["model"] = cfg.model;
     body["max_tokens"] = task.maxTokens;
     body["stream"] = true;
-    body["messages"] =
-        QJsonArray{QJsonObject{{"role", "user"}, {"content", task.prompt}}};
+    if (multiTurn) {
+      if (!task.system.isEmpty())
+        body["system"] = task.system;
+      body["messages"] = task.messages;
+    } else {
+      body["messages"] =
+          QJsonArray{QJsonObject{{"role", "user"}, {"content", task.prompt}}};
+    }
   }
 
   const int timeoutMs =

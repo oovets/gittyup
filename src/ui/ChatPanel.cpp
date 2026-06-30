@@ -1,5 +1,6 @@
 #include "ChatPanel.h"
 #include "ai/AiService.h"
+#include "ai/TaskDispatcher.h"
 #include "conf/Settings.h"
 #include "git/Commit.h"
 #include "git/Diff.h"
@@ -18,9 +19,6 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
-#include <QNetworkAccessManager>
-#include <QNetworkReply>
-#include <QNetworkRequest>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollBar>
@@ -43,8 +41,6 @@ protected:
 
 ChatPanel::ChatPanel(const git::Repository &repo, QWidget *parent)
     : QWidget(parent), mRepo(repo) {
-  mNet = new QNetworkAccessManager(this);
-
   QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
   mono.setPointSize(12);
 
@@ -272,7 +268,7 @@ void ChatPanel::sendMessage() {
   if (text.isEmpty())
     return;
 
-  if (mActiveReply) {
+  if (mActiveHandle != 0) {
     mStatusLabel->setText(tr("Still waiting for response…"));
     return;
   }
@@ -281,166 +277,51 @@ void ChatPanel::sendMessage() {
   appendMessage("user", text);
   mHistory.append({"user", text});
 
-  // Build the request
-  AiService::Config cfg = AiService::instance()->currentConfig();
-
-  QString baseUrl = cfg.baseUrl;
-  if (baseUrl.isEmpty())
-    baseUrl = QStringLiteral("http://localhost:11434");
-
-  QUrl url;
-  if (cfg.provider == "ollama") {
-    url = QUrl(baseUrl + "/api/chat");
-  } else {
-    url = QUrl("https://api.anthropic.com/v1/messages");
-  }
-
-  QNetworkRequest req(url);
-  req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-
-  QJsonObject body;
-
-  if (cfg.provider == "ollama") {
-    body["model"] = cfg.model.isEmpty() ? "llama3" : cfg.model;
-    body["stream"] = true;
-
-    QJsonArray messages;
-    // System message
-    QJsonObject sys;
-    sys["role"] = "system";
-    sys["content"] = buildSystemPrompt();
-    messages.append(sys);
-
-    // Conversation history
-    for (const auto &msg : mHistory) {
-      QJsonObject m;
-      m["role"] = msg.role;
-      m["content"] = msg.content;
-      messages.append(m);
-    }
-    body["messages"] = messages;
-  } else {
-    // Anthropic
-    req.setRawHeader("x-api-key", cfg.apiKey.toUtf8());
-    req.setRawHeader("anthropic-version", "2023-06-01");
-
-    body["model"] = cfg.model.isEmpty() ? "claude-sonnet-4-20250514" : cfg.model;
-    body["max_tokens"] = 4096;
-    body["stream"] = true;
-    body["system"] = buildSystemPrompt();
-
-    QJsonArray messages;
-    for (const auto &msg : mHistory) {
-      QJsonObject m;
-      m["role"] = msg.role;
-      m["content"] = msg.content;
-      messages.append(m);
-    }
-    body["messages"] = messages;
-  }
+  // Build the conversation message array (role/content) from history.
+  QJsonArray messages;
+  for (const auto &msg : mHistory)
+    messages.append(QJsonObject{{"role", msg.role}, {"content", msg.content}});
 
   mStreamBuffer.clear();
   mStatusLabel->setText(tr("Thinking…"));
   mSendBtn->setEnabled(false);
 
-  // Start the AI response block in the chat view
+  // Start the AI response block in the chat view.
   mChatView->append("<b>AI:</b> ");
 
-  req.setTransferTimeout(
-      Settings::instance()->value(Setting::Id::AiRequestTimeoutSeconds, 300).toInt() *
-      1000);
-  mActiveReply = mNet->post(req, QJsonDocument(body).toJson());
-
-  connect(mActiveReply, &QNetworkReply::readyRead, this,
-          &ChatPanel::onStreamData);
-  connect(mActiveReply, &QNetworkReply::finished, this,
-          &ChatPanel::onStreamFinished);
-}
-
-void ChatPanel::onStreamData() {
-  if (!mActiveReply)
-    return;
-
-  QByteArray data = mActiveReply->readAll();
-  AiService::Config cfg = AiService::instance()->currentConfig();
-
-  // Parse streaming response line by line
-  QList<QByteArray> lines = data.split('\n');
-  for (const QByteArray &line : lines) {
-    QByteArray trimmed = line.trimmed();
-    if (trimmed.isEmpty())
-      continue;
-
-    if (cfg.provider == "ollama") {
-      // Ollama streams JSON objects, one per line
-      QJsonDocument doc = QJsonDocument::fromJson(trimmed);
-      if (doc.isNull())
-        continue;
-      QJsonObject obj = doc.object();
-      QJsonObject msg = obj["message"].toObject();
-      QString content = msg["content"].toString();
-      if (!content.isEmpty()) {
-        mStreamBuffer += content;
-        // Update the last line in chat view
+  // Route through the dispatcher so chat shares timeouts, retry, cancellation
+  // and stats with the rest of the AI features. The dispatcher parses the
+  // provider-specific stream and hands us plain text deltas.
+  mActiveHandle = TaskDispatcher::instance()->submitStreamingChat(
+      messages, buildSystemPrompt(),
+      [this](const QString &chunk) {
+        if (chunk.isEmpty())
+          return;
+        mStreamBuffer += chunk;
         QTextCursor cursor = mChatView->textCursor();
         cursor.movePosition(QTextCursor::End);
-        cursor.insertText(content);
+        cursor.insertText(chunk);
         scrollToBottom();
-      }
-    } else {
-      // Anthropic SSE format: "data: {...}"
-      if (!trimmed.startsWith("data: "))
-        continue;
-      QByteArray json = trimmed.mid(6);
-      if (json == "[DONE]")
-        continue;
-      QJsonDocument doc = QJsonDocument::fromJson(json);
-      if (doc.isNull())
-        continue;
-      QJsonObject obj = doc.object();
-      QString type = obj["type"].toString();
-      if (type == "content_block_delta") {
-        QJsonObject delta = obj["delta"].toObject();
-        QString text = delta["text"].toString();
-        if (!text.isEmpty()) {
-          mStreamBuffer += text;
-          QTextCursor cursor = mChatView->textCursor();
-          cursor.movePosition(QTextCursor::End);
-          cursor.insertText(text);
-          scrollToBottom();
+      },
+      [this](const QString &full, const QString &error) {
+        Q_UNUSED(full);
+        mActiveHandle = 0;
+        if (!error.isEmpty() && mStreamBuffer.isEmpty()) {
+          mChatView->append(
+              QStringLiteral("<span style='color:red;'>Error: %1</span>")
+                  .arg(error.toHtmlEscaped().left(500)));
+          mStatusLabel->setText(tr("Request failed"));
+        } else {
+          if (!mStreamBuffer.isEmpty()) {
+            mHistory.append({"assistant", mStreamBuffer});
+            renderFormattedResponse();
+          }
+          mChatView->append("");
+          mStatusLabel->setText(tr("Ready"));
         }
-      }
-    }
-  }
-}
-
-void ChatPanel::onStreamFinished() {
-  if (!mActiveReply)
-    return;
-
-  int status = mActiveReply->attribute(
-      QNetworkRequest::HttpStatusCodeAttribute).toInt();
-
-  if (mActiveReply->error() != QNetworkReply::NoError || status >= 400) {
-    QString errText = mActiveReply->readAll();
-    if (errText.isEmpty())
-      errText = mActiveReply->errorString();
-    mChatView->append(
-        QStringLiteral("<span style='color:red;'>Error: %1</span>")
-            .arg(errText.toHtmlEscaped().left(500)));
-    mStatusLabel->setText(tr("Request failed"));
-  } else {
-    if (!mStreamBuffer.isEmpty()) {
-      mHistory.append({"assistant", mStreamBuffer});
-      renderFormattedResponse();
-    }
-    mChatView->append("");
-    mStatusLabel->setText(tr("Ready"));
-  }
-
-  mActiveReply->deleteLater();
-  mActiveReply = nullptr;
-  mSendBtn->setEnabled(true);
-  mInput->setFocus();
-  scrollToBottom();
+        mSendBtn->setEnabled(true);
+        mInput->setFocus();
+        scrollToBottom();
+      },
+      TaskDispatcher::Priority::Normal, 4096);
 }

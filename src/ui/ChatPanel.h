@@ -10,8 +10,6 @@ class QLineEdit;
 class QPushButton;
 class QLabel;
 class QComboBox;
-class QNetworkAccessManager;
-class QNetworkReply;
 
 class ChatPanel : public QWidget {
   Q_OBJECT
@@ -29,8 +27,6 @@ signals:
 
 private slots:
   void sendMessage();
-  void onStreamData();
-  void onStreamFinished();
 
 private:
   struct Message {
@@ -53,8 +49,7 @@ private:
   QPushButton *mClearBtn;
   QLabel *mStatusLabel;
 
-  QNetworkAccessManager *mNet;
-  QNetworkReply *mActiveReply = nullptr;
+  quint64 mActiveHandle = 0;
 
   QList<Message> mHistory;
   QString mStreamBuffer;

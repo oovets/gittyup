@@ -7,6 +7,7 @@
 #include <QSet>
 #include <QPointer>
 #include <QElapsedTimer>
+#include <QJsonArray>
 #include <functional>
 
 class AiService;
@@ -64,6 +65,15 @@ public:
                              Priority priority = Priority::Normal,
                              int maxTokens = 4096);
 
+  // Multi-turn streaming variant: sends a full message array (role/content
+  // objects) plus an optional system prompt. Used by the chat panel so it
+  // shares the dispatcher's timeouts, retry, cancellation and stats.
+  TaskHandle submitStreamingChat(const QJsonArray &messages,
+                                 const QString &system, StreamCallback onChunk,
+                                 StreamDoneCallback onDone,
+                                 Priority priority = Priority::Normal,
+                                 int maxTokens = 4096);
+
   // Abort a queued or in-flight task. The task's callback fires once with a
   // "Cancelled" result (non-streaming) or the partial text (streaming).
   void cancel(TaskHandle handle);
@@ -91,6 +101,8 @@ private:
     TaskType type;
     Priority priority;
     QString prompt;
+    QString system;       // optional system prompt (multi-turn chat)
+    QJsonArray messages;  // optional role/content array (multi-turn chat)
     int maxTokens;
     int attempt = 0;
     ResultCallback callback;
